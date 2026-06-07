@@ -39,6 +39,15 @@ kps:
           memory: 512Mi
   defaultRules:
     create: false
+  prometheus-node-exporter:
+    hostNetwork: false
+    service:
+      port: 9101
+      targetPort: 9101
+    extraArgs:
+      - --web.listen-address=[$(HOST_IP)]:9101
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run/containerd/.+|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
+      - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs|erofs)$
 
 loki:
   fullnameOverride: heimdall-loki
@@ -46,6 +55,16 @@ loki:
   loki:
     auth_enabled: false
     useTestSchema: true
+    commonConfig:
+      path_prefix: /tmp/loki
+      replication_factor: 1
+    rulerConfig:
+      wal:
+        dir: /tmp/loki/ruler-wal
+      storage:
+        type: local
+        local:
+          directory: /tmp/loki/rules
     storage:
       type: filesystem
   singleBinary:
