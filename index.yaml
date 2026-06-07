@@ -3,7 +3,7 @@ entries:
   heimdall-monitoring:
   - apiVersion: v2
     appVersion: 0.2.0
-    created: "2026-06-07T21:41:16.96487+09:00"
+    created: "2026-06-07T21:44:46.402667+09:00"
     dependencies:
     - alias: kps
       condition: lgtm.prometheus.enabled
@@ -26,13 +26,13 @@ entries:
       repository: https://grafana.github.io/helm-charts
       version: 1.8.2
     description: Heimdall service-cluster LGTM monitoring stack and single gateway
-    digest: 7804d6e33ce9e5754a1231958ee4c9542433a3614dfb140aa33bd2a669f29be0
+    digest: fd7019a3222e2227907768e3a6d5705f12297f8407524d7c8e7dfec2ba9c20fc
     home: https://github.com/S-Heimdall/monotoring_stack
     name: heimdall-monitoring
     sources:
     - https://github.com/S-Heimdall/monotoring_stack
     type: application
     urls:
-    - https://s-heimdall.github.io/monotoring_stack/heimdall-monitoring-0.2.3.tgz
-    version: 0.2.3
-generated: "2026-06-07T21:41:16.918811+09:00"
+    - https://s-heimdall.github.io/monotoring_stack/heimdall-monitoring-0.2.4.tgz
+    version: 0.2.4
+generated: "2026-06-07T21:44:46.355961+09:00"
