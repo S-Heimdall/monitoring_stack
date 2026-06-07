@@ -1,0 +1,6 @@
+apiVersion: v2
+name: heimdall-monitoring
+description: Heimdall service-cluster monitoring gateway
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

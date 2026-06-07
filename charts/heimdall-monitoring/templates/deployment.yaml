@@ -1,0 +1,44 @@
+{{- if .Values.global.singleGateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "heimdall-monitoring.name" . }}-single-gateway
+  labels:
+    {{- include "heimdall-monitoring.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "heimdall-monitoring.name" . }}-single-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "heimdall-monitoring.name" . }}-single-gateway
+    spec:
+      containers:
+        - name: single-gateway
+          image: {{ .Values.global.singleGateway.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/etc/heimdall/gateway.py"]
+          env:
+            - name: CONNECTION_DIRECTION
+              value: {{ .Values.global.connectionDirection | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/heimdall
+          readinessProbe:
+            httpGet:
+              path: /probe
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: {{ include "heimdall-monitoring.name" . }}-gateway
+{{- end }}
