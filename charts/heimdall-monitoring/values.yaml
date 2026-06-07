@@ -26,6 +26,8 @@ kps:
   fullnameOverride: heimdall-kps
   grafana:
     enabled: true
+  prometheusOperator:
+    enabled: false
   alertmanager:
     enabled: true
   prometheus:
