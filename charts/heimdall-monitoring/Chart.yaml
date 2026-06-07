@@ -1,6 +1,30 @@
 apiVersion: v2
 name: heimdall-monitoring
-description: Heimdall service-cluster monitoring gateway
+description: Heimdall service-cluster LGTM monitoring stack and single gateway
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
+home: https://github.com/S-Heimdall/monotoring_stack
+sources:
+  - https://github.com/S-Heimdall/monotoring_stack
+dependencies:
+  - name: kube-prometheus-stack
+    alias: kps
+    version: 86.2.0
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: lgtm.prometheus.enabled
+  - name: loki
+    alias: loki
+    version: 7.0.0
+    repository: https://grafana.github.io/helm-charts
+    condition: lgtm.loki.enabled
+  - name: tempo
+    alias: tempo
+    version: 1.24.4
+    repository: https://grafana.github.io/helm-charts
+    condition: lgtm.tempo.enabled
+  - name: alloy
+    alias: alloy
+    version: 1.8.2
+    repository: https://grafana.github.io/helm-charts
+    condition: lgtm.alloy.enabled

@@ -7,9 +7,9 @@ metadata:
 data:
   providers.json: |
     {
-      "prometheus": {{ .Values.providers.prometheus.url | quote }},
-      "loki": {{ .Values.providers.loki.url | quote }},
-      "tempo": {{ .Values.providers.tempo.url | quote }},
+      "prometheus": {{ tpl .Values.providers.prometheus.url . | quote }},
+      "loki": {{ tpl .Values.providers.loki.url . | quote }},
+      "tempo": {{ tpl .Values.providers.tempo.url . | quote }},
       "kubernetes_events": {{ .Values.providers.kubernetesEvents.enabled | quote }}
     }
   gateway.py: |

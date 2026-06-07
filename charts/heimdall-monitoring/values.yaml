@@ -1,4 +1,5 @@
 global:
+  clusterName: ""
   installToken: ""
   connectionDirection: pull_query
   singleGateway:
@@ -10,6 +11,89 @@ global:
         service.beta.kubernetes.io/aws-load-balancer-internal: "true"
         service.beta.kubernetes.io/aws-load-balancer-scheme: internal
         service.beta.kubernetes.io/aws-load-balancer-type: nlb
+
+lgtm:
+  prometheus:
+    enabled: true
+  loki:
+    enabled: true
+  tempo:
+    enabled: true
+  alloy:
+    enabled: true
+
+kps:
+  fullnameOverride: heimdall-kps
+  grafana:
+    enabled: true
+  alertmanager:
+    enabled: true
+  prometheus:
+    prometheusSpec:
+      retention: 6h
+      scrapeInterval: 30s
+      evaluationInterval: 30s
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+  defaultRules:
+    create: false
+
+loki:
+  fullnameOverride: heimdall-loki
+  deploymentMode: SingleBinary
+  loki:
+    auth_enabled: false
+    useTestSchema: true
+    storage:
+      type: filesystem
+  singleBinary:
+    replicas: 1
+    persistence:
+      enabled: false
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  backend:
+    replicas: 0
+  chunksCache:
+    enabled: false
+  resultsCache:
+    enabled: false
+  gateway:
+    enabled: true
+  lokiCanary:
+    enabled: false
+  test:
+    enabled: false
+
+tempo:
+  fullnameOverride: heimdall-tempo
+  tempo:
+    retention: 6h
+  persistence:
+    enabled: false
+  service:
+    type: ClusterIP
+
+alloy:
+  fullnameOverride: heimdall-alloy
+  alloy:
+    configMap:
+      create: true
+      content: |
+        logging {
+          level  = "info"
+          format = "logfmt"
+        }
+    mounts:
+      varlog: true
+  controller:
+    type: daemonset
+  service:
+    enabled: true
 
 alerting:
   alertmanager:
@@ -25,10 +109,10 @@ alerting:
 
 providers:
   prometheus:
-    url: http://prometheus-server.monitoring.svc.cluster.local
+    url: http://heimdall-kps-prometheus.{{ .Release.Namespace }}.svc.cluster.local:9090
   loki:
-    url: http://loki.monitoring.svc.cluster.local
+    url: http://heimdall-loki-gateway.{{ .Release.Namespace }}.svc.cluster.local
   tempo:
-    url: http://tempo.monitoring.svc.cluster.local
+    url: http://heimdall-tempo.{{ .Release.Namespace }}.svc.cluster.local:3200
   kubernetesEvents:
     enabled: true
