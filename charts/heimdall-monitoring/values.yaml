@@ -39,6 +39,8 @@ kps:
           memory: 512Mi
   defaultRules:
     create: false
+  nodeExporter:
+    enabled: false
   prometheus-node-exporter:
     enabled: false
 
@@ -71,6 +73,9 @@ loki:
           cache_location: /tmp/loki/tsdb-cache
     storage:
       type: filesystem
+      filesystem:
+        chunks_directory: /tmp/loki/chunks
+        rules_directory: /tmp/loki/rules
   singleBinary:
     replicas: 1
     persistence:
