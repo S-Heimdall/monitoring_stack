@@ -1,0 +1,205 @@
+# NPO Context Builder 트리거 알람. 원본(raw)으로 보관 — Helm 은 .Files.Get(템플릿 처리 X)으로 읽고
+# __TARGET_NS__(관측 대상 ns 정규식) / __RELEASE_NS__(릴리스 ns) 만 replace 로 치환한다.
+# 그래서 annotation 의 Prometheus 템플릿 {{ $labels.x }} 가 Helm 과 충돌하지 않는다.
+# scope: service|workload|pod|node|cluster — NPO 가 대상 라벨을 일관되게 읽기 위한 표기.
+- name: npo.service-red
+  interval: 30s
+  rules:
+  - alert: ServiceHighErrorRate
+    expr: |
+      sum by (service_name, k8s_namespace_name) (
+        rate(traces_span_metrics_calls_total{
+          k8s_namespace_name=~"__TARGET_NS__",
+          service_name!="flagd",
+          span_kind="SPAN_KIND_SERVER",
+          status_code="STATUS_CODE_ERROR"
+        }[2m])
+      )
+      /
+      sum by (service_name, k8s_namespace_name) (
+        rate(traces_span_metrics_calls_total{
+          k8s_namespace_name=~"__TARGET_NS__",
+          service_name!="flagd",
+          span_kind="SPAN_KIND_SERVER"
+        }[2m])
+      )
+      > 0.05
+    for: 1m
+    labels:
+      severity: critical
+      npo_category: service-red
+      scope: service
+    annotations:
+      summary: "{{ $labels.service_name }} — 에러율 초과"
+      description: "service={{ $labels.service_name }} — SERVER 에러율 > 5%가 1분간 지속. 현재 {{ $value | humanizePercentage }}."
+  - alert: ServiceHighLatencyP99
+    expr: |
+      histogram_quantile(0.99,
+        sum by (le, service_name, k8s_namespace_name) (
+          rate(traces_span_metrics_duration_milliseconds_bucket{
+            k8s_namespace_name=~"__TARGET_NS__",
+            service_name!="flagd",
+            span_kind="SPAN_KIND_SERVER"
+          }[2m])
+        )
+      ) / 1000 > 2
+    for: 2m
+    labels:
+      severity: warning
+      npo_category: service-red
+      scope: service
+    annotations:
+      summary: "{{ $labels.service_name }} — P99 지연 초과"
+      description: "service={{ $labels.service_name }} — P99 지연 > 2s가 2분간 지속. 현재 {{ $value | humanizeDuration }}."
+- name: npo.container-resource
+  interval: 30s
+  rules:
+  - alert: ContainerMemoryPressure
+    expr: |
+      sum by (namespace, pod, container) (
+        container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""}
+      )
+      /
+      sum by (namespace, pod, container) (
+        kube_pod_container_resource_limits{namespace=~"__TARGET_NS__", resource="memory"}
+      )
+      > 0.95
+    for: 15m
+    labels:
+      severity: warning
+      npo_category: container-resource
+      scope: pod
+    annotations:
+      summary: "{{ $labels.pod }}/{{ $labels.container }} — 메모리 압박"
+      description: "{{ $labels.pod }}/{{ $labels.container }} — 메모리/limit > 95%가 15분간 지속. 현재 {{ $value | humanizePercentage }}."
+  - alert: ContainerCPUThrottling
+    expr: |
+      sum by (namespace, pod, container) (
+        rate(container_cpu_cfs_throttled_periods_total{namespace=~"__TARGET_NS__", container!=""}[2m])
+      )
+      /
+      sum by (namespace, pod, container) (
+        rate(container_cpu_cfs_periods_total{namespace=~"__TARGET_NS__", container!=""}[2m])
+      )
+      > 0.25
+    for: 3m
+    labels:
+      severity: warning
+      npo_category: container-resource
+      scope: pod
+    annotations:
+      summary: "{{ $labels.pod }}/{{ $labels.container }} — CPU throttling"
+      description: "{{ $labels.pod }}/{{ $labels.container }} — CPU throttling > 25%가 3분간 지속(CPU limit 미설정이면 발화 불가). 현재 {{ $value | humanizePercentage }}."
+- name: npo.kubernetes-state
+  interval: 30s
+  rules:
+  - alert: PodOOMKilled
+    expr: |
+      kube_pod_container_status_terminated_reason{
+        namespace=~"__TARGET_NS__",
+        reason="OOMKilled"
+      } > 0
+    for: 0m
+    labels:
+      severity: critical
+      npo_category: kubernetes-state
+      scope: pod
+    annotations:
+      summary: "{{ $labels.pod }}/{{ $labels.container }} — OOMKilled"
+      description: "{{ $labels.pod }}/{{ $labels.container }} — OOMKilled 종료 발생. 메모리 limit 초과 또는 노드 압박."
+  - alert: PodCrashLooping
+    expr: |
+      increase(kube_pod_container_status_restarts_total{namespace=~"__TARGET_NS__"}[15m]) > 3
+    for: 2m
+    labels:
+      severity: critical
+      npo_category: kubernetes-state
+      scope: pod
+    annotations:
+      summary: "{{ $labels.pod }}/{{ $labels.container }} — CrashLooping"
+      description: "{{ $labels.pod }}/{{ $labels.container }} — 15분간 재시작 > 3회가 2분간 지속. 현재 {{ $value }}회."
+  - alert: DeploymentReplicasUnavailable
+    expr: |
+      kube_deployment_status_replicas_unavailable{namespace=~"__TARGET_NS__"} > 0
+    for: 2m
+    labels:
+      severity: warning
+      npo_category: kubernetes-state
+      scope: workload
+    annotations:
+      summary: "{{ $labels.deployment }} — 가용 레플리카 부족"
+      description: "{{ $labels.deployment }} — unavailable replica > 0이 2분간 지속. desired vs available 불일치."
+  - alert: PodNotReady
+    expr: |
+      sum by (namespace, pod) (
+        kube_pod_status_ready{namespace=~"__TARGET_NS__", condition="false"}
+      ) > 0
+    for: 3m
+    labels:
+      severity: warning
+      npo_category: kubernetes-state
+      scope: pod
+    annotations:
+      summary: "{{ $labels.pod }} — NotReady"
+      description: "{{ $labels.pod }} — Ready=false가 3분간 지속."
+  - alert: PodPending
+    expr: |
+      kube_pod_status_phase{namespace=~"__TARGET_NS__", phase="Pending"} == 1
+    for: 3m
+    labels:
+      severity: warning
+      npo_category: kubernetes-state
+      scope: pod
+    annotations:
+      summary: "{{ $labels.pod }} — Pending"
+      description: "{{ $labels.pod }} — Pending이 3분간 지속. 노드 부족 또는 image pull 실패 가능."
+- name: npo.node-infra
+  interval: 30s
+  rules:
+  - alert: NodeMemoryPressure
+    expr: |
+      1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.9
+    for: 5m
+    labels:
+      severity: warning
+      npo_category: node-infra
+      scope: node
+    annotations:
+      summary: "노드 {{ $labels.instance }} — 메모리 압박"
+      description: "노드 {{ $labels.instance }} — 메모리 사용률 > 90%가 5분간 지속. 현재 {{ $value | humanizePercentage }}."
+  - alert: NodeDiskPressure
+    expr: |
+      kube_node_status_condition{condition="DiskPressure", status="true"} == 1
+    for: 2m
+    labels:
+      severity: critical
+      npo_category: node-infra
+      scope: node
+    annotations:
+      summary: "노드 {{ $labels.node }} — DiskPressure"
+      description: "노드 {{ $labels.node }} — DiskPressure 컨디션 발생. Pod 축출 위험."
+- name: npo.monitoring-self
+  interval: 60s
+  rules:
+  - alert: ScrapeTargetDown
+    expr: |
+      up == 0
+    for: 3m
+    labels:
+      severity: warning
+      npo_category: monitoring-self
+      scope: cluster
+    annotations:
+      summary: "{{ $labels.job }}/{{ $labels.instance }} — 스크랩 실패"
+      description: "{{ $labels.job }}/{{ $labels.instance }} — 스크랩 실패(up==0)가 3분간 지속."
+  - alert: AlertmanagerNotConnected
+    expr: |
+      prometheus_notifications_alertmanagers_discovered{namespace="__RELEASE_NS__"} < 1
+    for: 2m
+    labels:
+      severity: critical
+      npo_category: monitoring-self
+      scope: cluster
+    annotations:
+      summary: "Alertmanager — 연결 끊김"
+      description: "Alertmanager — Prometheus가 2분간 발견 못 함. 알람 라우팅 중단."

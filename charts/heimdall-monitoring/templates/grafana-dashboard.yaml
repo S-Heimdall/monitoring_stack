@@ -1,0 +1,14 @@
+{{- if and .Values.lgtm.prometheus.enabled .Values.kps.grafana.enabled }}
+# NPO Overview 대시보드. grafana sidecar(grafana_dashboard 라벨)가 릴리스 ns 에서 자동 import.
+# JSON 의 legendFormat 라벨 치환 표기가 Helm 과 충돌하므로 files/ raw 를 .Files.Get 으로 임베드.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "heimdall-monitoring.name" . }}-dashboard-npo-overview
+  labels:
+    grafana_dashboard: "1"
+    {{- include "heimdall-monitoring.labels" . | nindent 4 }}
+data:
+  npo-overview.json: |
+{{ .Files.Get "files/npo-overview-dashboard.json" | indent 4 }}
+{{- end }}

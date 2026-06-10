@@ -1,18 +1,20 @@
-{{- if .Values.global.singleGateway.enabled }}
+{{- if .Values.gateway.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "heimdall-monitoring.name" . }}-single-gateway
+  name: {{ include "heimdall-monitoring.name" . }}-gateway
   labels:
     {{- include "heimdall-monitoring.labels" . | nindent 4 }}
+  {{- with .Values.gateway.service.annotations }}
   annotations:
-    {{- toYaml .Values.global.singleGateway.service.annotations | nindent 4 }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
-  type: {{ .Values.global.singleGateway.service.type }}
+  type: {{ .Values.gateway.service.type }}
   selector:
-    app.kubernetes.io/name: {{ include "heimdall-monitoring.name" . }}-single-gateway
+    app.kubernetes.io/name: {{ include "heimdall-monitoring.name" . }}-gateway
   ports:
     - name: http
-      port: 80
+      port: {{ .Values.gateway.service.port }}
       targetPort: http
 {{- end }}

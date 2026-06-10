@@ -1,0 +1,170 @@
+{
+  "title": "NPO Overview",
+  "uid": "npo-overview",
+  "tags": ["npo"],
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "time": {"from": "now-30m", "to": "now"},
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "namespace",
+        "type": "constant",
+        "query": "otel-demo",
+        "current": {"value": "otel-demo", "text": "otel-demo", "selected": true},
+        "options": [{"value": "otel-demo", "text": "otel-demo", "selected": true}],
+        "hide": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Service RED — Request Rate (req/s)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "kps-prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 8},
+      "targets": [{
+        "expr": "sum by (service_name) (rate(traces_span_metrics_calls_total{k8s_namespace_name=\"$namespace\",service_name!=\"flagd\",span_kind=\"SPAN_KIND_SERVER\"}[5m]))",
+        "legendFormat": "{{service_name}}"
+      }]
+    },
+    {
+      "id": 2,
+      "title": "Service RED — Error Rate (5xx %)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "kps-prometheus"},
+      "gridPos": {"x": 8, "y": 0, "w": 8, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}, {"value": 0.01, "color": "yellow"}, {"value": 0.05, "color": "red"}]}}},
+      "targets": [{
+        "expr": "sum by (service_name) (rate(traces_span_metrics_calls_total{k8s_namespace_name=\"$namespace\",service_name!=\"flagd\",span_kind=\"SPAN_KIND_SERVER\",status_code=\"STATUS_CODE_ERROR\"}[5m])) / sum by (service_name) (rate(traces_span_metrics_calls_total{k8s_namespace_name=\"$namespace\",service_name!=\"flagd\",span_kind=\"SPAN_KIND_SERVER\"}[5m]))",
+        "legendFormat": "{{service_name}}"
+      }]
+    },
+    {
+      "id": 3,
+      "title": "Service RED — P99 Latency (ms)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "kps-prometheus"},
+      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "ms"}},
+      "targets": [{
+        "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(traces_span_metrics_duration_milliseconds_bucket{k8s_namespace_name=\"$namespace\",service_name!=\"flagd\",span_kind=\"SPAN_KIND_SERVER\"}[5m])))",
+        "legendFormat": "{{service_name}}"
+      }]
+    },
+    {
+      "id": 4,
+      "title": "Downstream Calls (spanmetrics)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "kps-prometheus"},
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "targets": [{
+        "expr": "sum by (service_name, span_name) (rate(traces_span_metrics_calls_total{k8s_namespace_name=\"$namespace\"}[5m]))",
+        "legendFormat": "{{service_name}} → {{span_name}}"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "Container Memory Utilization (vs limit)",
+      "type": "bargauge",
+      "datasource": {"type": "prometheus", "uid": "kps-prometheus"},
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}, {"value": 0.75, "color": "yellow"}, {"value": 0.9, "color": "red"}]}}},
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "reduceOptions": {"calc": "lastNotNull", "fields": "", "values": false}},
+      "targets": [{
+        "expr": "max by (container) (sum by (namespace, pod, container) (container_memory_working_set_bytes{namespace=\"$namespace\",container!=\"\",container!~\"grafana-sc-.*|pause\"}) / sum by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=\"$namespace\",resource=\"memory\"}))",
+        "legendFormat": "{{container}}",
+        "instant": true
+      }]
+    },
+    {
+      "id": 6,
+      "title": "K8s State — Unavailable Replicas",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "kps-prometheus"},
+      "gridPos": {"x": 0, "y": 16, "w": 6, "h": 6},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}, {"value": 1, "color": "red"}]}}},
+      "targets": [{
+        "expr": "sum by (deployment) (kube_deployment_status_replicas_unavailable{namespace=\"$namespace\"} > 0)",
+        "legendFormat": "{{deployment}}"
+      }]
+    },
+    {
+      "id": 7,
+      "title": "K8s State — Pod Restarts (rate)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "kps-prometheus"},
+      "gridPos": {"x": 6, "y": 16, "w": 6, "h": 6},
+      "targets": [{
+        "expr": "sum by (pod) (rate(kube_pod_container_status_restarts_total{namespace=\"$namespace\"}[15m]))",
+        "legendFormat": "{{pod}}"
+      }]
+    },
+    {
+      "id": 8,
+      "title": "K8s Events (Warning)",
+      "type": "logs",
+      "datasource": {"type": "loki", "uid": "loki"},
+      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 6},
+      "targets": [{
+        "expr": "{job=\"kubernetes-events\"} |= \"Warning\"",
+        "queryType": "range"
+      }]
+    },
+    {
+      "id": 9,
+      "title": "Container Logs (errors)",
+      "type": "logs",
+      "datasource": {"type": "loki", "uid": "loki"},
+      "gridPos": {"x": 0, "y": 22, "w": 24, "h": 8},
+      "targets": [{
+        "expr": "{k8s_namespace_name=\"$namespace\"} |~ \"(?i)error|exception|panic|fatal\"",
+        "queryType": "range"
+      }]
+    },
+    {
+      "id": 10,
+      "title": "Service Success Rate (Tempo service graph)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "kps-prometheus"},
+      "gridPos": {"x": 0, "y": 30, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}},
+      "targets": [{
+        "expr": "sum by (server) (rate(traces_service_graph_request_total[5m]) - rate(traces_service_graph_request_failed_total[5m])) / clamp_min(sum by (server) (rate(traces_service_graph_request_total[5m])), 0.001)",
+        "legendFormat": "{{server}}"
+      }]
+    },
+    {
+      "id": 11,
+      "title": "Active Alerts",
+      "type": "table",
+      "datasource": {"type": "prometheus", "uid": "kps-prometheus"},
+      "gridPos": {"x": 12, "y": 30, "w": 12, "h": 8},
+      "description": "npo_category가 붙은 발화 중 alert와 최초 감지 시각. Prometheus ALERTS_FOR_STATE(active 시작 epoch)를 ALERTS firing과 조합. alertlist+Alertmanager 데이터소스 패널이 외부 AM alert를 못 그리는 이슈를 피함.",
+      "targets": [{
+        "refId": "A",
+        "datasource": {"type": "prometheus", "uid": "kps-prometheus"},
+        "expr": "(ALERTS_FOR_STATE{npo_category=~\".+\"} and ignoring(alertstate) ALERTS{npo_category=~\".+\", alertstate=\"firing\"}) * 1000",
+        "instant": true,
+        "format": "table"
+      }],
+      "transformations": [{
+        "id": "organize",
+        "options": {
+          "excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "prometheus": true, "endpoint": true, "uid": true},
+          "renameByName": {"alertname": "알람", "severity": "심각도", "npo_category": "카테고리", "service_name": "서비스"}
+        }
+      }],
+      "options": {"showHeader": true, "sortBy": [{"displayName": "최초 감지", "desc": true}]},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "left"}},
+        "overrides": [{
+          "matcher": {"id": "byName", "options": "Value"},
+          "properties": [{"id": "displayName", "value": "최초 감지"}, {"id": "unit", "value": "dateTimeAsIso"}]
+        }]
+      }
+    }
+  ]
+}
