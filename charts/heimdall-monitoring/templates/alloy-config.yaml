@@ -1,0 +1,159 @@
+{{- if .Values.lgtm.alloy.enabled }}
+# Alloy(DaemonSet) River 설정. values 가 아니라 umbrella ConfigMap 로 외부화해
+# targetNamespaces 를 템플릿으로 주입한다. alloy 서브차트는 configMap.create=false 로 이걸 참조.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "heimdall-monitoring.name" . }}-alloy-config
+  labels:
+    {{- include "heimdall-monitoring.labels" . | nindent 4 }}
+data:
+  config.alloy: |
+    // ============================================================
+    // 컨테이너 로그 수집
+    // ============================================================
+    discovery.kubernetes "pods" {
+      role = "pod"
+    }
+
+    discovery.relabel "pods" {
+      targets = discovery.kubernetes.pods.targets
+
+      // 관측 대상 네임스페이스만 keep (소음 감소). 릴리스 ns(모니터링 스택 자체) 포함.
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        regex         = "{{ join "|" .Values.targetNamespaces }}|{{ .Release.Namespace }}"
+        action        = "keep"
+      }
+
+      // 표준 라벨 매핑
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "k8s_namespace_name"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "k8s_pod_name"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "k8s_container_name"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_node_name"]
+        target_label  = "k8s_node_name"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_controller_name"]
+        target_label  = "k8s_controller_name"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+        target_label  = "service_name"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_container_name"]
+        separator     = "/"
+        target_label  = "job"
+      }
+    }
+
+    loki.source.kubernetes "pods" {
+      targets    = discovery.relabel.pods.output
+      forward_to = [loki.write.default.receiver]
+    }
+
+    // ============================================================
+    // K8s 이벤트 수집
+    // ============================================================
+    loki.source.kubernetes_events "events" {
+      job_name   = "kubernetes-events"
+      log_format = "logfmt"
+      forward_to = [loki.process.events.receiver]
+    }
+
+    loki.process "events" {
+      forward_to = [loki.write.default.receiver]
+
+      stage.json {
+        expressions = {
+          k8s_namespace_name = "namespace",
+          reason             = "reason",
+          type               = "type",
+          involved_kind      = "kind",
+          involved_name      = "name",
+        }
+      }
+      stage.labels {
+        values = {
+          k8s_namespace_name = "",
+          reason             = "",
+          type               = "",
+        }
+      }
+      stage.static_labels {
+        values = {
+          job = "kubernetes-events",
+        }
+      }
+    }
+
+    // ============================================================
+    // Loki write endpoint
+    // ============================================================
+    loki.write "default" {
+      endpoint {
+        url = "http://heimdall-loki:3100/loki/api/v1/push"
+      }
+    }
+
+    // ============================================================
+    // OTLP receiver (메트릭/로그/트레이스 입구) → LGTM 분배
+    // ============================================================
+    otelcol.receiver.otlp "default" {
+      grpc {
+        endpoint = "0.0.0.0:4317"
+      }
+      http {
+        endpoint = "0.0.0.0:4318"
+      }
+      output {
+        metrics = [otelcol.processor.batch.default.input]
+        logs    = [otelcol.processor.batch.default.input]
+        traces  = [otelcol.processor.batch.default.input]
+      }
+    }
+
+    otelcol.processor.batch "default" {
+      output {
+        metrics = [otelcol.exporter.otlphttp.prometheus.input]
+        logs    = [otelcol.exporter.loki.default.input]
+        traces  = [otelcol.exporter.otlp.tempo.input]
+      }
+    }
+
+    // 메트릭 → KPS Prometheus (OTLP write receiver)
+    otelcol.exporter.otlphttp "prometheus" {
+      client {
+        endpoint = "http://heimdall-kps-prometheus:9090/api/v1/otlp"
+        tls {
+          insecure = true
+        }
+      }
+    }
+
+    // 로그 → 위 loki.write 로
+    otelcol.exporter.loki "default" {
+      forward_to = [loki.write.default.receiver]
+    }
+
+    // 트레이스 → Tempo (OTLP gRPC)
+    otelcol.exporter.otlp "tempo" {
+      client {
+        endpoint = "heimdall-tempo:4317"
+        tls {
+          insecure = true
+        }
+      }
+    }
+{{- end }}

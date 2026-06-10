@@ -1,17 +1,67 @@
+# heimdall-monitoring — Heimdall 서비스 클러스터 LGTM 관측 스택 + read-gateway
+#
+# OTel_Demo/monitoring 에서 검증된 설정을 그대로 반영했다. helm install 한 번으로 동일한
+# LGTM 스택(메트릭/로그/트레이스 + Alertmanager 라우팅 + read-gateway)이 뜬다.
+#
+# helm 서브차트 values 는 Go 템플릿이 적용되지 않으므로(values 는 데이터),
+# 서비스 엔드포인트는 fullnameOverride 로 고정된 짧은 이름(heimdall-kps-prometheus 등)을 그대로 쓴다.
+# 동일 네임스페이스(릴리스 ns)에 모두 배포되므로 short DNS 로 해석된다.
+#
+# 클러스터마다 바꿔야 하는 값:
+#   - kps.prometheus.prometheusSpec.externalLabels.cluster : 소스 클러스터 식별자(--set 권장)
+#   - storageClassName(gp3-standard) : 클러스터 StorageClass 에 맞게(kps/loki/tempo 3곳)
+#   - gateway.token / alerting.alertmanager.webhook.token : Bearer 토큰(--set, git 커밋 금지)
+#   - targetNamespaces : 관측 대상 앱 네임스페이스
+
 global:
   clusterName: ""
   installToken: ""
   connectionDirection: pull_query
-  singleGateway:
-    enabled: true
-    image: python:3.12-slim
-    service:
-      type: LoadBalancer
-      annotations:
-        service.beta.kubernetes.io/aws-load-balancer-internal: "true"
-        service.beta.kubernetes.io/aws-load-balancer-scheme: internal
-        service.beta.kubernetes.io/aws-load-balancer-type: nlb
+  # 원격 Heimdall webhook (alert push 목적지). global 에 둬야 kps 서브차트가 config 렌더 시 참조 가능.
+  # 설치 때 NPO 주소만 바꾼다: --set global.heimdall.webhookUrl=https://<npo-host>/api/v1/alerts/webhook/alertmanager
+  heimdall:
+    webhookEnabled: true
+    # 경로는 NPO 스펙 고정(/api/v1/alerts/webhook/{source}, source=alertmanager). host 만 실주소로 교체.
+    webhookUrl: "https://heimdall.REPLACE_ME.example.com/api/v1/alerts/webhook/alertmanager"
+    webhookToken: ""
 
+# 관측 대상 네임스페이스. Alloy 로그 수집 keep-필터 + npo-alerts namespace 매처에 사용.
+# 릴리스 네임스페이스(모니터링 스택 자체)는 자동 포함된다.
+targetNamespaces:
+  - otel-demo
+
+# ─────────────────────────────────────────────
+# read-gateway : 외부(NPO)가 PromQL/LogQL/TraceQL 을 pull 조회하는 단일 진입점
+# nginx reverse-proxy 1개로 Bearer 인증 + 읽기전용 allowlist 처리.
+# ─────────────────────────────────────────────
+gateway:
+  enabled: true
+  replicas: 2
+  image: nginxinc/nginx-unprivileged:1.27-alpine
+  # Bearer 토큰. 비우면 secret 만 만들어지고 값이 빈 채라 인증 불가 → --set 으로 주입.
+  token: ""
+  # nginx upstream 백엔드(같은 네임스페이스 short DNS). 기본값은 이 차트가 설치하는
+  # LGTM 서비스명(fullnameOverride). 게이트웨이만 단독 설치해 기존 스택을 가리킬 땐
+  # --set 으로 현행 서비스명으로 덮는다(예: prometheus=kps-kube-prometheus-stack-prometheus:9090).
+  upstreams:
+    prometheus: heimdall-kps-prometheus:9090
+    loki: heimdall-loki:3100
+    tempo: heimdall-tempo:3200
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+  service:
+    type: LoadBalancer
+    port: 80
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+
+# 서브차트 on/off
 lgtm:
   prometheus:
     enabled: true
@@ -22,127 +72,383 @@ lgtm:
   alloy:
     enabled: true
 
+# ─────────────────────────────────────────────
+# kube-prometheus-stack (메트릭 + Alertmanager + Operator + Grafana)
+# ─────────────────────────────────────────────
 kps:
   fullnameOverride: heimdall-kps
+
+  # standalone 설치라 번들 grafana 사용. 데이터소스는 additionalDataSources 로 프로비전.
   grafana:
     enabled: true
-  prometheusOperator:
-    enabled: false
-  alertmanager:
-    enabled: true
-  prometheus:
-    prometheusSpec:
-      retention: 6h
-      scrapeInterval: 30s
-      evaluationInterval: 30s
-      resources:
-        requests:
-          cpu: 100m
-          memory: 512Mi
-  defaultRules:
-    create: false
-  nodeExporter:
-    enabled: false
+    sidecar:
+      datasources:
+        defaultDatasourceEnabled: false
+    additionalDataSources:
+      - name: KPS-Prometheus
+        type: prometheus
+        uid: kps-prometheus
+        access: proxy
+        url: http://heimdall-kps-prometheus:9090
+        isDefault: true
+        editable: false
+        jsonData:
+          httpMethod: POST
+          timeInterval: 30s
+          exemplarTraceIdDestinations:
+            - name: trace_id
+              datasourceUid: tempo
+      - name: Tempo
+        type: tempo
+        uid: tempo
+        access: proxy
+        url: http://heimdall-tempo:3200
+        isDefault: false
+        editable: false
+        jsonData:
+          tracesToLogsV2:
+            datasourceUid: loki
+            filterByTraceID: true
+            tags:
+              - { key: 'service.name', value: 'service_name' }
+              - { key: 'k8s.namespace.name', value: 'k8s_namespace_name' }
+          tracesToMetrics:
+            datasourceUid: kps-prometheus
+            tags:
+              - { key: 'service.name', value: 'service_name' }
+          nodeGraph:
+            enabled: true
+          serviceMap:
+            datasourceUid: kps-prometheus
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://heimdall-loki:3100
+        isDefault: false
+        editable: false
+        jsonData:
+          derivedFields:
+            - name: TraceID
+              matcherRegex: "trace_id=(\\w+)"
+              url: "$${__value.raw}"
+              datasourceUid: tempo
+      - name: Alertmanager
+        type: alertmanager
+        uid: alertmanager
+        access: proxy
+        url: http://heimdall-kps-alertmanager:9093
+        isDefault: false
+        editable: false
+        jsonData:
+          implementation: prometheus
+          handleGrafanaManagedAlerts: false
+
+  kube-state-metrics:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 50Mi
+      limits:
+        memory: 150Mi
+
   prometheus-node-exporter:
+    hostNetwork: true
+    resources:
+      requests:
+        cpu: 10m
+        memory: 15Mi
+      limits:
+        memory: 100Mi
+
+  prometheusOperator:
+    # standalone 설치는 operator 동봉. 클러스터에 이미 operator 가 있으면 false.
+    enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 100Mi
+      limits:
+        memory: 200Mi
+
+  defaultRules:
+    create: true
+
+  # 관리형 EKS 는 컨트롤플레인 scrape 불가 → false-positive 제거
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+  kubeProxy:
     enabled: false
 
+  alertmanager:
+    enabled: true
+    # config 를 tpl 로 렌더 → 아래 webhook url 의 {{ .Values.global.heimdall.webhookUrl }} 치환
+    tplConfig: true
+    alertmanagerSpec:
+      replicas: 1
+      resources:
+        requests:
+          cpu: 50m
+          memory: 100Mi
+        limits:
+          memory: 200Mi
+      # EBS 영속(silence·알림 dedup 상태 보존)
+      storage:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: gp3-standard
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 1Gi
+      # webhook Bearer 토큰 마운트(/etc/alertmanager/secrets/heimdall-webhook-token/token).
+      # 이 secret 은 차트가 alerting.alertmanager.webhook.token 값으로 생성한다(templates/secret.yaml).
+      secrets:
+        - heimdall-webhook-token
+    # 기본 receiver=blackhole, npo_category 붙은 알람만 npo-webhook 으로(나머지 누출 방지).
+    config:
+      global:
+        resolve_timeout: 5m
+      route:
+        group_by: ["alertname", "namespace", "service_name"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 12h
+        receiver: blackhole
+        routes:
+          - matchers:
+              - alertname = "Watchdog"
+            receiver: blackhole
+          - matchers:
+              - severity = "info"
+            receiver: blackhole
+          - matchers:
+              - npo_category =~ ".+"
+            receiver: npo-webhook
+            continue: false
+      receivers:
+        - name: blackhole
+        - name: npo-webhook
+          webhook_configs:
+            # url 은 global.heimdall.webhookUrl 을 tpl 로 주입. 경로 /api/v1/alerts/webhook/alertmanager 고정.
+            # 설치 시: --set global.heimdall.webhookUrl=https://<npo-host>/api/v1/alerts/webhook/alertmanager
+            - url: "{{ .Values.global.heimdall.webhookUrl }}"
+              send_resolved: true
+              max_alerts: 0
+              http_config:
+                authorization:
+                  type: Bearer
+                  credentials_file: /etc/alertmanager/secrets/heimdall-webhook-token/token
+                tls_config:
+                  insecure_skip_verify: false
+      inhibit_rules:
+        - source_matchers:
+            - severity = "critical"
+          target_matchers:
+            - severity = "warning"
+          equal: ["service_name", "k8s_namespace_name"]
+
+  prometheus:
+    prometheusSpec:
+      retention: 24h
+      replicas: 1
+      # 소스 클러스터/프로젝트 식별 라벨(외부로 나가는 alert/remote-write 에 부착).
+      # cluster 는 설치 시 --set 으로 채운다: kps.prometheus.prometheusSpec.externalLabels.cluster
+      externalLabels:
+        cluster: ""
+        heimdall_project: otel-demo
+      resources:
+        requests:
+          cpu: 200m
+          memory: 400Mi
+        limits:
+          memory: 1500Mi
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: gp3-standard
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 5Gi
+      # OTLP write receiver(/api/v1/otlp) — Alloy 가 메트릭을 여기로 보낸다
+      enableOTLPReceiver: true
+      # remote-write receiver(/api/v1/write) — Tempo service-graph 메트릭 수신
+      enableRemoteWriteReceiver: true
+      otlp:
+        promoteResourceAttributes:
+          - k8s.namespace.name
+          - k8s.pod.name
+          - k8s.container.name
+          - k8s.deployment.name
+          - k8s.node.name
+          - service.name
+          - service.version
+          - service.instance.id
+      # 모든 ServiceMonitor/PodMonitor/Rule 을 라벨 무관 선택
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      probeSelectorNilUsesHelmValues: false
+      scrapeConfigSelectorNilUsesHelmValues: false
+
+# ─────────────────────────────────────────────
+# Loki (SingleBinary, EBS 영속)
+# ─────────────────────────────────────────────
 loki:
   fullnameOverride: heimdall-loki
   deploymentMode: SingleBinary
   loki:
     auth_enabled: false
-    useTestSchema: true
     commonConfig:
-      path_prefix: /tmp/loki
       replication_factor: 1
-      storage:
-        filesystem:
-          chunks_directory: /tmp/loki/chunks
-          rules_directory: /tmp/loki/rules
-    rulerConfig:
-      wal:
-        dir: /tmp/loki/ruler-wal
-      storage:
-        type: local
-        local:
-          directory: /tmp/loki/rules
-    structuredConfig:
-      storage_config:
-        bloom_shipper:
-          working_directory: /tmp/loki/bloomshipper
-        tsdb_shipper:
-          active_index_directory: /tmp/loki/tsdb-index
-          cache_location: /tmp/loki/tsdb-cache
     storage:
       type: filesystem
+    limits_config:
+      retention_period: 24h
+      allow_structured_metadata: true
+      volume_enabled: true
+    schemaConfig:
+      configs:
+        - from: "2025-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: loki_index_
+            period: 24h
+    storage_config:
+      tsdb_shipper:
+        active_index_directory: /var/loki/tsdb-index
+        cache_location: /var/loki/tsdb-cache
       filesystem:
-        chunks_directory: /tmp/loki/chunks
-        rules_directory: /tmp/loki/rules
+        directory: /var/loki/chunks
   singleBinary:
     replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 300Mi
+      limits:
+        memory: 800Mi
     persistence:
-      enabled: false
+      enabled: true
+      size: 5Gi
+      storageClass: gp3-standard
   read:
     replicas: 0
   write:
     replicas: 0
   backend:
     replicas: 0
+  # SingleBinary 는 직접 접근(heimdall-loki:3100). gateway 불필요.
+  gateway:
+    enabled: false
   chunksCache:
     enabled: false
   resultsCache:
     enabled: false
-  gateway:
-    enabled: true
   lokiCanary:
     enabled: false
   test:
     enabled: false
+  minio:
+    enabled: false
+  monitoring:
+    serviceMonitor:
+      enabled: true
 
+# ─────────────────────────────────────────────
+# Tempo (SingleBinary, EBS 영속, service-graph metrics-generator)
+# ─────────────────────────────────────────────
 tempo:
   fullnameOverride: heimdall-tempo
   tempo:
-    retention: 6h
+    retention: 24h
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+        wal:
+          path: /var/tempo/wal
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    # service-graph 메트릭(traces_service_graph_*)을 Prometheus remote_write 로 푸시
+    metricsGenerator:
+      enabled: true
+      remoteWriteUrl: "http://heimdall-kps-prometheus:9090/api/v1/write"
+      processor:
+        service_graphs:
+          wait: 10s
+      storage:
+        path: "/var/tempo/generator/wal"
+    overrides:
+      defaults:
+        metrics_generator:
+          processors:
+            - service-graphs
   persistence:
-    enabled: false
+    enabled: true
+    size: 5Gi
+    storageClassName: gp3-standard
+  resources:
+    requests:
+      cpu: 100m
+      memory: 300Mi
+    limits:
+      memory: 800Mi
+  serviceMonitor:
+    enabled: true
   service:
     type: ClusterIP
 
+# ─────────────────────────────────────────────
+# Grafana Alloy (DaemonSet 수집 hub)
+# River 설정은 umbrella ConfigMap(templates/alloy-config.yaml)로 외부화 →
+# targetNamespaces 를 템플릿으로 주입할 수 있다.
+# ─────────────────────────────────────────────
 alloy:
   fullnameOverride: heimdall-alloy
   alloy:
     configMap:
-      create: true
-      content: |
-        logging {
-          level  = "info"
-          format = "logfmt"
-        }
-    mounts:
-      varlog: true
+      create: false
+      name: heimdall-monitoring-alloy-config
+      key: config.alloy
+    # OTLP 수신 포트를 Service 에 노출(앱 otel-collector 가 heimdall-alloy:4317/4318 로 전송).
+    # 이게 없으면 config 가 4317/4318 을 listen 해도 Service 가 라우팅하지 않아 수집이 안 된다.
+    extraPorts:
+      - name: otlp-grpc
+        port: 4317
+        targetPort: 4317
+        protocol: TCP
+      - name: otlp-http
+        port: 4318
+        targetPort: 4318
+        protocol: TCP
+    resources:
+      requests:
+        cpu: 20m
+        memory: 30Mi
+      limits:
+        memory: 300Mi
   controller:
     type: daemonset
   service:
     enabled: true
-
-alerting:
-  alertmanager:
-    webhook:
-      enabled: true
-      url: ""
-      token: ""
-  grafana:
-    webhook:
-      enabled: false
-      url: ""
-      token: ""
-
-providers:
-  prometheus:
-    url: http://heimdall-kps-prometheus.{{ .Release.Namespace }}.svc.cluster.local:9090
-  loki:
-    url: http://heimdall-loki-gateway.{{ .Release.Namespace }}.svc.cluster.local
-  tempo:
-    url: http://heimdall-tempo.{{ .Release.Namespace }}.svc.cluster.local:3200
-  kubernetesEvents:
+  serviceMonitor:
     enabled: true
+  crds:
+    create: false
+
+# alert push(Alertmanager → 원격 Heimdall webhook) 설정은 위 global.heimdall(webhookUrl/webhookToken)에 있다.
+# token 은 templates/secret.yaml 이 heimdall-webhook-token secret 으로 생성해 AM 에 마운트한다.

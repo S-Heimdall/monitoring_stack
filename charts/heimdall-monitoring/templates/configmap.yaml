@@ -1,3 +1,6 @@
+{{- if .Values.gateway.enabled }}
+# read-gateway nginx 설정. 공식 nginx 이미지 템플릿 메커니즘(envsubst)으로 ${HEIMDALL_READ_TOKEN} 만 치환,
+# $http_authorization·$1 등 nginx 변수는 보존(entrypoint 가 정의된 env 만 envsubst 대상으로 넘김).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -5,41 +8,59 @@ metadata:
   labels:
     {{- include "heimdall-monitoring.labels" . | nindent 4 }}
 data:
-  providers.json: |
-    {
-      "prometheus": {{ tpl .Values.providers.prometheus.url . | quote }},
-      "loki": {{ tpl .Values.providers.loki.url . | quote }},
-      "tempo": {{ tpl .Values.providers.tempo.url . | quote }},
-      "kubernetes_events": {{ .Values.providers.kubernetesEvents.enabled | quote }}
+  default.conf.template: |
+    # 정적 upstream(같은 네임스페이스 short DNS) → resolver 불필요. 백엔드 주소는 values.gateway.upstreams.
+    upstream prometheus { server {{ .Values.gateway.upstreams.prometheus }}; }
+    upstream loki       { server {{ .Values.gateway.upstreams.loki }}; }
+    upstream tempo      { server {{ .Values.gateway.upstreams.tempo }}; }
+
+    map_hash_bucket_size 128;
+
+    # Authorization: Bearer <token> 일치 여부
+    map $http_authorization $heimdall_auth_ok {
+        default                              0;
+        "Bearer ${HEIMDALL_READ_TOKEN}"      1;
     }
-  gateway.py: |
-    import json
-    import os
-    from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    with open("/etc/heimdall/providers.json", "r", encoding="utf-8") as f:
-        PROVIDERS = json.load(f)
+    server {
+        listen 8080;
+        server_name _;
 
-    class Handler(BaseHTTPRequestHandler):
-        def _json(self, status, body):
-            data = json.dumps(body).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+        large_client_header_buffers 4 16k;
 
-        def do_GET(self):
-            if self.path in ["/healthz", "/probe"]:
-                self._json(200, {"status": "pass", "connection_direction": os.getenv("CONNECTION_DIRECTION", "pull_query"), "providers": PROVIDERS})
-                return
-            self._json(404, {"error": "not_found"})
+        proxy_http_version 1.1;
+        proxy_read_timeout 30s;
+        proxy_connect_timeout 5s;
+        # 업스트림으로 Authorization 헤더 전달하지 않음(LGTM auth_enabled=false)
+        proxy_set_header Authorization "";
 
-        def do_POST(self):
-            if self.path.startswith("/query/"):
-                provider = self.path.rsplit("/", 1)[-1]
-                self._json(200, {"status": "pass", "provider": provider, "result_excerpt": "single_gateway route reachable", "row_count": 0})
-                return
-            self._json(404, {"error": "not_found"})
+        location = /healthz { return 200 "ok\n"; }
 
-    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+        # ---- Prometheus 읽기 전용 allowlist ----
+        location ~ ^/prometheus/(api/v1/(query|query_range|series|labels|label/[^/]+/values|metadata|targets|rules|alerts|status/[^/]+))$ {
+            if ($heimdall_auth_ok = 0) { return 401; }
+            rewrite ^/prometheus/(.*)$ /$1 break;
+            proxy_pass http://prometheus;
+        }
+
+        # ---- Loki 읽기 전용 allowlist ----
+        location ~ ^/loki/(loki/api/v1/(query|query_range|labels|label/[^/]+/values|series|index/stats))$ {
+            if ($heimdall_auth_ok = 0) { return 401; }
+            rewrite ^/loki/(.*)$ /$1 break;
+            proxy_pass http://loki;
+        }
+
+        # ---- Tempo 읽기 전용 allowlist ----
+        location ~ ^/tempo/(api/(echo|search|search/tags|search/tag/[^/]+/values|traces/[^/]+)|api/v2/search.*)$ {
+            if ($heimdall_auth_ok = 0) { return 401; }
+            rewrite ^/tempo/(.*)$ /$1 break;
+            proxy_pass http://tempo;
+        }
+
+        # 그 외 모든 경로(쓰기/관리 API 포함) 차단
+        location / {
+            if ($heimdall_auth_ok = 0) { return 401; }
+            return 403;
+        }
+    }
+{{- end }}
