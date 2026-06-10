@@ -1,0 +1,26 @@
+[project]
+name = "heimdall-single-gateway"
+version = "0.1.0"
+description = "Heimdall single_gateway — 서비스 클러스터 내부 LGTM read-only telemetry query 라우팅 (API 명세 §3.3.5.1)"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
