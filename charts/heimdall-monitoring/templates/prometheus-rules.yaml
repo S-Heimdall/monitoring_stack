@@ -1,5 +1,5 @@
 {{- if .Values.lgtm.prometheus.enabled }}
-# npo-alerts 13룰. files/npo-alerts.rules.yaml 를 raw(.Files.Get, 템플릿 처리 안 함)로 읽어
+# npo-alerts 19룰(기본 13 + 예측형 6). files/npo-alerts.rules.yaml 를 raw(.Files.Get, 템플릿 처리 안 함)로 읽어
 # Prometheus annotation 템플릿 표기를 보존하고, namespace 플레이스홀더만 replace 로 치환한다.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
