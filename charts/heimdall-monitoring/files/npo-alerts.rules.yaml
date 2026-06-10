@@ -203,3 +203,132 @@
     annotations:
       summary: "Alertmanager — 연결 끊김"
       description: "Alertmanager — Prometheus가 2분간 발견 못 함. 알람 라우팅 중단."
+# ─────────────────────────────────────────────
+# 6. SLO 에러버짓 번레이트 (예측형: SLO 깨지기 전 경보)
+# 이미 터진 에러율과 달리, 에러버짓 소진 "속도"로 위반 임박을 잡는다. 다중 창(5m·1h) 동시 충족.
+# ─────────────────────────────────────────────
+- name: npo.slo-burn
+  interval: 30s
+  rules:
+  - alert: CheckoutErrorBudgetBurnFast
+    expr: |
+      (
+        sum(rate(traces_span_metrics_calls_total{k8s_namespace_name=~"__TARGET_NS__", service_name="checkout", span_kind="SPAN_KIND_SERVER", status_code="STATUS_CODE_ERROR"}[5m]))
+        / sum(rate(traces_span_metrics_calls_total{k8s_namespace_name=~"__TARGET_NS__", service_name="checkout", span_kind="SPAN_KIND_SERVER"}[5m]))
+        > 0.144
+      )
+      and
+      (
+        sum(rate(traces_span_metrics_calls_total{k8s_namespace_name=~"__TARGET_NS__", service_name="checkout", span_kind="SPAN_KIND_SERVER", status_code="STATUS_CODE_ERROR"}[1h]))
+        / sum(rate(traces_span_metrics_calls_total{k8s_namespace_name=~"__TARGET_NS__", service_name="checkout", span_kind="SPAN_KIND_SERVER"}[1h]))
+        > 0.144
+      )
+    for: 2m
+    labels:
+      severity: critical
+      npo_category: slo-burn
+      scope: service
+      service_name: checkout
+    annotations:
+      summary: "checkout — 에러버짓 빠른 소진(SLO 위반 임박)"
+      description: "checkout 가용성 SLO(목표 99%)의 에러버짓을 14.4x 속도로 소진 중(5m·1h 에러율 동시 > 14.4%). 이대로면 곧 SLO 위반."
+# ─────────────────────────────────────────────
+# 7. 포화 선행지표 (예측형: 한계로 수렴 → 곧 고갈/OOM/백로그)
+# ─────────────────────────────────────────────
+- name: npo.saturation
+  interval: 30s
+  rules:
+  - alert: DBConnectionPoolSaturation
+    expr: |
+      db_client_connection_count{k8s_namespace_name=~"__TARGET_NS__", db_client_connection_state="used"}
+      / on (k8s_pod_name, db_client_connection_pool_name)
+      db_client_connection_max{k8s_namespace_name=~"__TARGET_NS__"}
+      > 0.8
+    for: 3m
+    labels:
+      severity: warning
+      npo_category: saturation
+      scope: service
+    annotations:
+      summary: "{{ $labels.service_name }} — DB 커넥션 풀 포화"
+      description: "{{ $labels.service_name }} — 사용 커넥션/max > 80%가 3분간 지속. 풀 고갈 시 신규 쿼리 대기/실패. 현재 {{ $value | humanizePercentage }}."
+  - alert: KafkaConsumerLagGrowing
+    expr: |
+      kafka_consumer_records_lag_avg{k8s_namespace_name=~"__TARGET_NS__"} > 100
+    for: 2m
+    labels:
+      severity: warning
+      npo_category: saturation
+      scope: workload
+    annotations:
+      summary: "{{ $labels.service_name }} — Kafka consumer lag 누적"
+      description: "{{ $labels.service_name }} consumer(topic={{ $labels.topic }}) lag > 100 records가 2분간 지속. 컨슈머가 처리 속도를 못 따라가 백로그 누적 중. 현재 {{ $value }}."
+  - alert: ContainerMemoryFillingUp
+    # 높음(>85%) "그리고" 실제 증가 중(20분간 limit의 3% 이상 상승)일 때만.
+    # JVM 등 정상적으로 limit 근처에 상주하는 컨테이너(kafka ~91%)의 상시 오탐 방지.
+    expr: |
+      (
+        sum by (namespace, pod, container) (container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""})
+        / sum by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=~"__TARGET_NS__", resource="memory"})
+        > 0.85
+      )
+      and
+      (
+        sum by (namespace, pod, container) (
+          container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""}
+          - container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""} offset 20m
+        )
+        / sum by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=~"__TARGET_NS__", resource="memory"})
+        > 0.03
+      )
+    for: 10m
+    labels:
+      severity: warning
+      npo_category: saturation
+      scope: pod
+    annotations:
+      summary: "{{ $labels.pod }}/{{ $labels.container }} — 메모리 차오름(OOM 선행)"
+      description: "{{ $labels.pod }}/{{ $labels.container }} — 메모리/limit > 85%이고 20분간 계속 상승 중. >95%(ContainerMemoryPressure)·OOMKilled 직전 선행 신호. 현재 {{ $value | humanizePercentage }}."
+  - alert: NodeDiskWillFillSoon
+    expr: |
+      (
+        predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay", mountpoint="/"}[6h], 24*3600) < 0
+      )
+      and
+      (
+        node_filesystem_avail_bytes{fstype!~"tmpfs|overlay", mountpoint="/"}
+        / node_filesystem_size_bytes{fstype!~"tmpfs|overlay", mountpoint="/"}
+        < 0.4
+      )
+    for: 15m
+    labels:
+      severity: warning
+      npo_category: node-infra
+      scope: node
+    annotations:
+      summary: "노드 {{ $labels.instance }} — 디스크 24h 내 소진 예상"
+      description: "노드 {{ $labels.instance }} 루트 디스크가 현재 추세로 24시간 내 소진 예상(predict_linear) & 여유 < 40%. 선제 정리/증설 필요."
+# ─────────────────────────────────────────────
+# 8. 오토스케일링 한계 (예측형: 부하 늘면 늘려서 대응하다 천장에 막힘)
+# ─────────────────────────────────────────────
+- name: npo.autoscaling
+  interval: 30s
+  rules:
+  - alert: HPAScaleOutBlocked
+    expr: |
+      (
+        kube_horizontalpodautoscaler_status_condition{namespace=~"__TARGET_NS__", condition="ScalingLimited", status="true"} == 1
+      )
+      and on (horizontalpodautoscaler, namespace)
+      (
+        kube_horizontalpodautoscaler_status_current_replicas{namespace=~"__TARGET_NS__"}
+        >= kube_horizontalpodautoscaler_spec_max_replicas{namespace=~"__TARGET_NS__"}
+      )
+    for: 2m
+    labels:
+      severity: critical
+      npo_category: autoscaling
+      scope: workload
+    annotations:
+      summary: "{{ $labels.horizontalpodautoscaler }} — HPA 스케일아웃 한계(더 못 늘림)"
+      description: "HPA {{ $labels.horizontalpodautoscaler }} — max replica 도달 & ScalingLimited가 2분간 지속. 부하를 더 받으면 흡수 불가, 서비스 저하 임박."

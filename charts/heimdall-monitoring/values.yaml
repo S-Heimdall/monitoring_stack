@@ -420,13 +420,17 @@ tempo:
 # targetNamespaces 를 템플릿으로 주입할 수 있다.
 # ─────────────────────────────────────────────
 alloy:
-  fullnameOverride: heimdall-alloy
+  # 서비스명을 'alloy' 로 고정한다(다른 컴포넌트와 달리 heimdall- 프리픽스 미사용).
+  # 앱 otel-collector 가 alloy.<release-ns>.svc:4317/4318 로 텔레메트리를 보내기 때문에,
+  # 이름을 바꾸면 앱 설정을 같이 고쳐야 한다. 앱 무변경을 위해 'alloy' 로 둔다.
+  # (차트는 앱이 가리키는 네임스페이스에 설치할 것 — 데모는 monitoring.)
+  fullnameOverride: alloy
   alloy:
     configMap:
       create: false
       name: heimdall-monitoring-alloy-config
       key: config.alloy
-    # OTLP 수신 포트를 Service 에 노출(앱 otel-collector 가 heimdall-alloy:4317/4318 로 전송).
+    # OTLP 수신 포트를 Service 에 노출(앱 otel-collector 가 alloy:4317/4318 로 전송).
     # 이게 없으면 config 가 4317/4318 을 listen 해도 Service 가 라우팅하지 않아 수집이 안 된다.
     extraPorts:
       - name: otlp-grpc
