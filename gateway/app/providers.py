@@ -1,0 +1,149 @@
+"""provider 라우팅 — 서비스 클러스터 내부 LGTM으로 read-only query를 전달한다.
+
+single_gateway는 Heimdall DB를 보지 않는다. upstream(Prometheus/Loki/Tempo) 주소는
+환경변수로 주입되며(차트 values.gateway.upstreams), provider별 native query API로 변환해
+호출한 뒤 결과를 §3.3.5.1 응답 형태(row_count/result_excerpt)로 정규화한다.
+"""
+from __future__ import annotations
+
+import os
+from datetime import datetime
+
+import httpx
+
+SUPPORTED = {"prometheus", "mimir", "loki", "tempo", "k8s_events"}
+HTTP_TIMEOUT = float(os.environ.get("QUERY_TIMEOUT_SECONDS", "20"))
+
+
+class ProviderError(Exception):
+    """upstream 조회 실패 — 502 TELEMETRY_PROVIDER_QUERY_FAILED로 매핑."""
+
+
+def _upstreams() -> dict[str, str]:
+    # k8s 이벤트는 Loki에 적재되므로 loki upstream을 공유한다.
+    loki = os.environ.get("UPSTREAM_LOKI", "heimdall-loki:3100")
+    prom = os.environ.get("UPSTREAM_PROMETHEUS", "heimdall-kps-prometheus:9090")
+    return {
+        "prometheus": prom,
+        "mimir": prom,
+        "loki": loki,
+        "k8s_events": loki,
+        "tempo": os.environ.get("UPSTREAM_TEMPO", "heimdall-tempo:3200"),
+    }
+
+
+def _base(provider: str) -> str:
+    return f"http://{_upstreams()[provider]}"
+
+
+def _get(url: str, params: dict) -> httpx.Response:
+    # 실제 upstream 호출 지점(테스트 monkeypatch 대상).
+    return httpx.get(url, params=params, timeout=HTTP_TIMEOUT)
+
+
+def _call(url: str, params: dict) -> dict:
+    try:
+        r = _get(url, params)
+    except httpx.HTTPError as exc:
+        raise ProviderError(str(exc)) from exc
+    if r.status_code >= 400:
+        raise ProviderError(f"upstream {r.status_code}: {r.text[:200]}")
+    try:
+        return r.json()
+    except ValueError as exc:
+        raise ProviderError(f"non-json upstream response: {exc}") from exc
+
+
+def _step_seconds(start: datetime, end: datetime) -> int:
+    span = max(1, int((end - start).total_seconds()))
+    return max(15, span // 200)
+
+
+def _labels(metric: dict) -> str:
+    items = {k: v for k, v in metric.items() if k != "__name__"}
+    if not items:
+        return ""
+    inner = ", ".join(f'{k}="{v}"' for k, v in list(items.items())[:4])
+    return "{" + inner + "}"
+
+
+def _prometheus(provider: str, query: str, start: datetime, end: datetime) -> dict:
+    body = _call(f"{_base(provider)}/api/v1/query_range", {
+        "query": query,
+        "start": start.timestamp(),
+        "end": end.timestamp(),
+        "step": f"{_step_seconds(start, end)}s",
+    })
+    series = (body.get("data") or {}).get("result") or []
+    excerpt = None
+    if series:
+        m = series[0].get("metric", {})
+        name = m.get("__name__") or query
+        pts = series[0].get("values") or []
+        last = pts[-1][1] if pts else "?"
+        excerpt = f"{name}{_labels(m)} = {last}"
+    return {"row_count": len(series), "result_excerpt": excerpt}
+
+
+def _loki(provider: str, query: str, start: datetime, end: datetime, limit: int | None) -> dict:
+    body = _call(f"{_base(provider)}/loki/api/v1/query_range", {
+        "query": query,
+        "start": int(start.timestamp() * 1_000_000_000),
+        "end": int(end.timestamp() * 1_000_000_000),
+        "limit": limit or 100,
+        "direction": "backward",
+    })
+    streams = (body.get("data") or {}).get("result") or []
+    rows = sum(len(s.get("values") or []) for s in streams)
+    excerpt = None
+    for s in streams:
+        vals = s.get("values") or []
+        if vals:
+            excerpt = str(vals[0][1])[:200]
+            break
+    return {"row_count": rows, "result_excerpt": excerpt}
+
+
+def _tempo(query: str, start: datetime, end: datetime, limit: int | None) -> dict:
+    body = _call(f"{_base('tempo')}/api/search", {
+        "q": query,
+        "start": int(start.timestamp()),
+        "end": int(end.timestamp()),
+        "limit": limit or 20,
+    })
+    traces = body.get("traces") or []
+    excerpt = None
+    if traces:
+        t = traces[0]
+        excerpt = f"{t.get('rootServiceName', '?')} {t.get('traceID', '')}".strip()[:200]
+    return {"row_count": len(traces), "result_excerpt": excerpt}
+
+
+def run_query(provider: str, query: str, start: datetime, end: datetime, limit: int | None) -> dict:
+    """provider native query 실행 후 {row_count, result_excerpt} 반환."""
+    if provider in ("prometheus", "mimir"):
+        return _prometheus(provider, query, start, end)
+    if provider in ("loki", "k8s_events"):
+        return _loki(provider, query, start, end, limit)
+    if provider == "tempo":
+        return _tempo(query, start, end, limit)
+    raise ProviderError(f"unsupported provider: {provider}")
+
+
+# ── 등록 verify(§3.3.5) probe ─────────────────────────────────────────
+# monitoring-stack/verify가 single_gateway base에 때리는 provider 도달성 경로.
+# 무인증으로 upstream health/route에 라우팅해 routing 가능 여부만 증명한다.
+PROBE_ROUTES = {
+    "/-/healthy": ("prometheus", "/-/healthy"),
+    "/loki/api/v1/labels": ("loki", "/loki/api/v1/labels"),
+    "/api/echo": ("tempo", "/api/echo"),
+    "/api/v1/events": ("k8s_events", "/loki/api/v1/labels"),
+}
+
+
+def probe(path: str) -> httpx.Response:
+    provider, upstream_path = PROBE_ROUTES[path]
+    try:
+        return _get(f"{_base(provider)}{upstream_path}", {})
+    except httpx.HTTPError as exc:
+        raise ProviderError(str(exc)) from exc

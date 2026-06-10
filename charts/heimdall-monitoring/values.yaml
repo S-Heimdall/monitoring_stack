@@ -31,17 +31,19 @@ targetNamespaces:
   - otel-demo
 
 # ─────────────────────────────────────────────
-# read-gateway : 외부(NPO)가 PromQL/LogQL/TraceQL 을 pull 조회하는 단일 진입점
-# nginx reverse-proxy 1개로 Bearer 인증 + 읽기전용 allowlist 처리.
+# single_gateway : AIOps telemetry-query-gateway 가 PrivateLink 로 호출하는 단일 진입점.
+# POST /internal/telemetry/query (명세 §3.3.5.1) 로 provider별 내부 LGTM 에 read-only 라우팅.
+# query 경로는 Bearer 인증, 등록 verify probe 경로(/-/healthy·/api/echo 등)는 무인증.
 # ─────────────────────────────────────────────
 gateway:
   enabled: true
   replicas: 2
-  image: nginxinc/nginx-unprivileged:1.27-alpine
-  # Bearer 토큰. 비우면 secret 만 만들어지고 값이 빈 채라 인증 불가 → --set 으로 주입.
+  # single_gateway 앱 이미지(gateway/ 소스 빌드).
+  image: amdp-registry.skala-ai.com/skala26a-cloud/heimdall-single-gateway:0.1.0
+  # Bearer 토큰. 비우면 secret 만 만들어지고 값이 빈 채라 인증 비활성 → --set 으로 주입.
   token: ""
-  # nginx upstream 백엔드(같은 네임스페이스 short DNS). 기본값은 이 차트가 설치하는
-  # LGTM 서비스명(fullnameOverride). 게이트웨이만 단독 설치해 기존 스택을 가리킬 땐
+  # provider별 내부 LGTM upstream(같은 네임스페이스 short DNS, host:port). 기본값은 이 차트가
+  # 설치하는 LGTM 서비스명(fullnameOverride). 게이트웨이만 단독 설치해 기존 스택을 가리킬 땐
   # --set 으로 현행 서비스명으로 덮는다(예: prometheus=kps-kube-prometheus-stack-prometheus:9090).
   upstreams:
     prometheus: heimdall-kps-prometheus:9090

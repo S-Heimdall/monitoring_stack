@@ -2,8 +2,8 @@ apiVersion: v2
 name: heimdall-monitoring
 description: Heimdall service-cluster LGTM monitoring stack and single gateway
 type: application
-version: 0.3.0
-appVersion: "0.3.0"
+version: 0.4.0
+appVersion: "0.4.0"
 home: https://github.com/S-Heimdall/monotoring_stack
 sources:
   - https://github.com/S-Heimdall/monotoring_stack

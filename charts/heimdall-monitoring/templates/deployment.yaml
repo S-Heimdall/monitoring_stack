@@ -16,22 +16,26 @@ spec:
         app.kubernetes.io/name: {{ include "heimdall-monitoring.name" . }}-gateway
     spec:
       containers:
-        - name: nginx
+        - name: gateway
           image: {{ .Values.gateway.image | quote }}
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
           env:
+            # Bearer 토큰(미설정 시 인증 비활성). verify probe는 무인증.
             - name: HEIMDALL_READ_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: heimdall-read-gateway-token
                   key: token
-          volumeMounts:
-            - name: nginx-template
-              mountPath: /etc/nginx/templates
-              readOnly: true
+            # provider별 내부 LGTM upstream(host:port). values.gateway.upstreams.
+            - name: UPSTREAM_PROMETHEUS
+              value: {{ .Values.gateway.upstreams.prometheus | quote }}
+            - name: UPSTREAM_LOKI
+              value: {{ .Values.gateway.upstreams.loki | quote }}
+            - name: UPSTREAM_TEMPO
+              value: {{ .Values.gateway.upstreams.tempo | quote }}
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
           readinessProbe:
@@ -46,8 +50,4 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 20
-      volumes:
-        - name: nginx-template
-          configMap:
-            name: {{ include "heimdall-monitoring.name" . }}-gateway
 {{- end }}
