@@ -9,10 +9,10 @@ metadata:
     {{- include "heimdall-monitoring.labels" . | nindent 4 }}
 data:
   default.conf.template: |
-    # 정적 upstream(같은 네임스페이스 short DNS) → resolver 불필요
-    upstream prometheus { server heimdall-kps-prometheus:9090; }
-    upstream loki       { server heimdall-loki:3100; }
-    upstream tempo      { server heimdall-tempo:3200; }
+    # 정적 upstream(같은 네임스페이스 short DNS) → resolver 불필요. 백엔드 주소는 values.gateway.upstreams.
+    upstream prometheus { server {{ .Values.gateway.upstreams.prometheus }}; }
+    upstream loki       { server {{ .Values.gateway.upstreams.loki }}; }
+    upstream tempo      { server {{ .Values.gateway.upstreams.tempo }}; }
 
     map_hash_bucket_size 128;
 

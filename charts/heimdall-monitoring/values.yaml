@@ -40,6 +40,13 @@ gateway:
   image: nginxinc/nginx-unprivileged:1.27-alpine
   # Bearer 토큰. 비우면 secret 만 만들어지고 값이 빈 채라 인증 불가 → --set 으로 주입.
   token: ""
+  # nginx upstream 백엔드(같은 네임스페이스 short DNS). 기본값은 이 차트가 설치하는
+  # LGTM 서비스명(fullnameOverride). 게이트웨이만 단독 설치해 기존 스택을 가리킬 땐
+  # --set 으로 현행 서비스명으로 덮는다(예: prometheus=kps-kube-prometheus-stack-prometheus:9090).
+  upstreams:
+    prometheus: heimdall-kps-prometheus:9090
+    loki: heimdall-loki:3100
+    tempo: heimdall-tempo:3200
   resources:
     requests:
       cpu: 25m
