@@ -27,7 +27,7 @@ kps:
   grafana:
     enabled: true
   prometheusOperator:
-    enabled: false
+    enabled: true
   alertmanager:
     enabled: true
   prometheus:

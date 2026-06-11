@@ -15,31 +15,146 @@ data:
   gateway.py: |
     import json
     import os
+    import ssl
+    import urllib.request
+    import urllib.error
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     with open("/etc/heimdall/providers.json", "r", encoding="utf-8") as f:
         PROVIDERS = json.load(f)
 
+    PROMETHEUS = PROVIDERS["prometheus"].rstrip("/")
+    LOKI       = PROVIDERS["loki"].rstrip("/")
+    TEMPO      = PROVIDERS["tempo"].rstrip("/")
+
+    # K8s in-cluster credentials
+    _TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    _CA_PATH    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    K8S_API     = "https://kubernetes.default.svc"
+    try:
+        K8S_TOKEN  = open(_TOKEN_PATH).read().strip()
+        K8S_SSL    = ssl.create_default_context(cafile=_CA_PATH)
+        _k8s_opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=K8S_SSL)
+        )
+    except Exception:
+        K8S_TOKEN  = None
+        _k8s_opener = None
+
+
+    def _do_request(req, timeout=5, opener=None):
+        """Execute a urllib Request, return (status, body_bytes, content_type)."""
+        try:
+            open_fn = opener.open if opener else urllib.request.urlopen
+            with open_fn(req, timeout=timeout) as r:
+                ct = r.headers.get("Content-Type", "application/json")
+                return r.status, r.read(), ct
+        except urllib.error.HTTPError as e:
+            ct = e.headers.get("Content-Type", "application/json")
+            return e.code, e.read(), ct
+        except Exception as e:
+            body = json.dumps({"error": str(e)}).encode()
+            return 503, body, "application/json"
+
+
+    def proxy(target_url):
+        return _do_request(urllib.request.Request(target_url))
+
+
+    def proxy_k8s(path):
+        if not K8S_TOKEN:
+            return 503, b'{"error":"no service account"}', "application/json"
+        req = urllib.request.Request(
+            f"{K8S_API}{path}",
+            headers={"Authorization": f"Bearer {K8S_TOKEN}"},
+        )
+        return _do_request(req, opener=_k8s_opener)
+
+
     class Handler(BaseHTTPRequestHandler):
-        def _json(self, status, body):
-            data = json.dumps(body).encode("utf-8")
+        def log_message(self, fmt, *args):
+            pass  # suppress noisy access log
+
+        def _send(self, status, body, ct="application/json"):
+            if isinstance(body, str):
+                body = body.encode()
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(data)
+            self.wfile.write(body)
 
         def do_GET(self):
-            if self.path in ["/healthz", "/probe"]:
-                self._json(200, {"status": "pass", "connection_direction": os.getenv("CONNECTION_DIRECTION", "pull_query"), "providers": PROVIDERS})
+            p = self.path  # includes query string
+
+            # Gateway health
+            if p.split("?")[0] in ("/", "/healthz", "/probe"):
+                self._send(200, json.dumps({
+                    "status": "pass",
+                    "connection_direction": os.getenv("CONNECTION_DIRECTION", "pull_query"),
+                    "providers": PROVIDERS,
+                }))
                 return
-            self._json(404, {"error": "not_found"})
+
+            # Prometheus: /-/healthy  /prometheus/...
+            if p.split("?")[0] == "/-/healthy" or p.startswith("/prometheus/"):
+                prom_path = p[len("/prometheus"):] if p.startswith("/prometheus/") else p
+                s, b, ct = proxy(f"{PROMETHEUS}{prom_path}")
+                self._send(s, b, ct)
+                return
+
+            # Loki: /loki/...
+            if p.startswith("/loki/"):
+                s, b, ct = proxy(f"{LOKI}{p}")
+                self._send(s, b, ct)
+                return
+
+            # Tempo: /api/echo  /tempo/...
+            if p.split("?")[0] == "/api/echo" or p.startswith("/tempo/"):
+                tempo_path = p[len("/tempo"):] if p.startswith("/tempo/") else p
+                s, b, ct = proxy(f"{TEMPO}{tempo_path}")
+                self._send(s, b, ct)
+                return
+
+            # K8s Events: /api/v1/events (and other k8s paths)
+            if p.startswith("/api/v1/") or p.startswith("/apis/"):
+                s, b, ct = proxy_k8s(p)
+                self._send(s, b, ct)
+                return
+
+            self._send(404, json.dumps({"error": "no route", "path": p.split("?")[0]}))
 
         def do_POST(self):
-            if self.path.startswith("/query/"):
-                provider = self.path.rsplit("/", 1)[-1]
-                self._json(200, {"status": "pass", "provider": provider, "result_excerpt": "single_gateway route reachable", "row_count": 0})
+            p = self.path
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length else b""
+
+            # Prometheus instant/range query
+            if p.startswith("/prometheus/") or p.split("?")[0] in ("/prometheus/api/v1/query", "/prometheus/api/v1/query_range"):
+                prom_path = p[len("/prometheus"):] if p.startswith("/prometheus/") else p
+                req = urllib.request.Request(f"{PROMETHEUS}{prom_path}", data=body,
+                    headers={"Content-Type": self.headers.get("Content-Type", "application/x-www-form-urlencoded")})
+                s, b, ct = _do_request(req)
+                self._send(s, b, ct)
                 return
-            self._json(404, {"error": "not_found"})
+
+            # Loki push / query
+            if p.startswith("/loki/"):
+                req = urllib.request.Request(f"{LOKI}{p}", data=body,
+                    headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
+                s, b, ct = _do_request(req)
+                self._send(s, b, ct)
+                return
+
+            # Tempo trace ingest / search
+            if p.startswith("/tempo/"):
+                tempo_path = p[len("/tempo"):]
+                req = urllib.request.Request(f"{TEMPO}{tempo_path}", data=body,
+                    headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
+                s, b, ct = _do_request(req)
+                self._send(s, b, ct)
+                return
+
+            self._send(404, json.dumps({"error": "no route", "path": p.split("?")[0]}))
 
     HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
