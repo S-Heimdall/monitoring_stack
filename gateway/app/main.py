@@ -18,7 +18,7 @@ from fastapi.responses import PlainTextResponse
 from app import providers
 from app.schemas import TelemetryQueryRequest, TelemetryQueryResponse
 
-app = FastAPI(title="Heimdall single_gateway", version="0.1.0")
+app = FastAPI(title="Heimdall single_gateway", version="0.2.0")
 
 VALID_SIGNALS = {"metrics", "logs", "traces", "kubernetes_events"}
 
@@ -104,6 +104,7 @@ def telemetry_query(
         status="pass",
         result_excerpt=result["result_excerpt"],
         row_count=result["row_count"],
+        rows=result["rows"],
         started_at=started,
         completed_at=completed,
     )

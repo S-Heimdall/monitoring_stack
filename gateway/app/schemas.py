@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -38,5 +40,7 @@ class TelemetryQueryResponse(BaseModel):
     result_ref: str | None = None
     result_excerpt: str | None = None
     row_count: int | None = None
+    # provider-faithful raw 행. 소비자 Evidence MCP가 필수로 요구한다.
+    rows: list[dict[str, Any]] = Field(default_factory=list)
     started_at: datetime
     completed_at: datetime

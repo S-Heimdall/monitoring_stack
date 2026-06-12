@@ -1,6 +1,6 @@
 [project]
 name = "heimdall-single-gateway"
-version = "0.1.0"
+version = "0.2.0"
 description = "Heimdall single_gateway — 서비스 클러스터 내부 LGTM read-only telemetry query 라우팅 (API 명세 §3.3.5.1)"
 requires-python = ">=3.11"
 dependencies = [

@@ -17,7 +17,8 @@ def _patch_upstream(monkeypatch, payload, status=200):
 
 def test_prometheus_query(monkeypatch):
     _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": [
-        {"metric": {"__name__": "up", "job": "checkout"}, "values": [[1, "1"], [2, "1"]]},
+        {"metric": {"__name__": "up", "job": "checkout", "service_name": "checkout"},
+         "values": [[1, "1"], [2, "1"]]},
     ]}})
     r = client.post("/internal/telemetry/query", json={
         "signal": "metrics", "provider": "prometheus", "query": "up", "time_window": WINDOW})
@@ -27,6 +28,12 @@ def test_prometheus_query(monkeypatch):
     assert d["status"] == "pass"
     assert d["row_count"] == 1
     assert "up" in d["result_excerpt"]
+    # rows: provider-faithful 행 노출(소비자 Evidence MCP 필수).
+    assert len(d["rows"]) == 1
+    row = d["rows"][0]
+    assert row["metric_name"] == "up"
+    assert row["service"] == "checkout"
+    assert row["observed_value"] == 1.0
     # AIOps측 필드는 single_gateway에서 null
     assert d["telemetry_connection_id"] is None
     assert d["result_ref"] is None
@@ -35,22 +42,46 @@ def test_prometheus_query(monkeypatch):
 
 def test_loki_query(monkeypatch):
     _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "streams", "result": [
-        {"stream": {"app": "checkout"}, "values": [["1", "payment timeout"], ["2", "retry"]]},
+        {"stream": {"app": "checkout", "service_name": "checkout", "level": "warning"},
+         "values": [["1", "payment timeout"], ["2", "retry"]]},
     ]}})
     r = client.post("/internal/telemetry/query", json={
         "signal": "logs", "provider": "loki", "query": '{app="checkout"}', "time_window": WINDOW, "limit": 50})
     d = r.json()["data"]
     assert d["row_count"] == 2
     assert d["result_excerpt"] == "payment timeout"
+    # rows: 스트림 값 하나당 행 하나.
+    assert len(d["rows"]) == 2
+    assert d["rows"][0]["message"] == "payment timeout"
+    assert d["rows"][0]["service"] == "checkout"
+    assert d["rows"][0]["level"] == "warning"
+
+
+def test_loki_rows_capped_by_limit(monkeypatch):
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "streams", "result": [
+        {"stream": {"app": "checkout"}, "values": [["1", "a"], ["2", "b"], ["3", "c"]]},
+    ]}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "logs", "provider": "loki", "query": '{app="checkout"}', "time_window": WINDOW, "limit": 2})
+    d = r.json()["data"]
+    assert d["row_count"] == 3  # 전체 집계는 그대로
+    assert len(d["rows"]) == 2  # 노출 행은 limit 상한
 
 
 def test_tempo_query(monkeypatch):
-    _patch_upstream(monkeypatch, {"traces": [{"traceID": "abc123", "rootServiceName": "checkout"}]})
+    _patch_upstream(monkeypatch, {"traces": [
+        {"traceID": "abc123", "rootServiceName": "checkout", "rootTraceName": "POST /checkout",
+         "durationMs": 3200},
+    ]})
     r = client.post("/internal/telemetry/query", json={
         "signal": "traces", "provider": "tempo", "query": "{}", "time_window": WINDOW})
     d = r.json()["data"]
     assert d["row_count"] == 1
     assert "checkout" in d["result_excerpt"]
+    assert len(d["rows"]) == 1
+    assert d["rows"][0]["service"] == "checkout"
+    assert d["rows"][0]["span"] == "POST /checkout"
+    assert d["rows"][0]["trace_id"] == "abc123"
 
 
 def test_kubernetes_events_routes_to_loki(monkeypatch):
