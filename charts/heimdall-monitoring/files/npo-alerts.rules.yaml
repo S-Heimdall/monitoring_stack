@@ -241,7 +241,7 @@
   - alert: DBConnectionPoolSaturation
     expr: |
       db_client_connection_count{k8s_namespace_name=~"__TARGET_NS__", db_client_connection_state="used"}
-      / on (k8s_pod_name, db_client_connection_pool_name)
+      / on (k8s_pod_name, db_client_connection_pool_name) group_left()
       db_client_connection_max{k8s_namespace_name=~"__TARGET_NS__"}
       > 0.8
     for: 3m
