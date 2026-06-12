@@ -39,7 +39,7 @@ gateway:
   enabled: true
   replicas: 2
   # single_gateway 앱 이미지(gateway/ 소스 빌드).
-  image: amdp-registry.skala-ai.com/skala26a-cloud/heimdall-single-gateway:0.1.0
+  image: amdp-registry.skala-ai.com/skala26a-cloud/heimdall-single-gateway:0.2.0
   # Bearer 토큰. 비우면 secret 만 만들어지고 값이 빈 채라 인증 비활성 → --set 으로 주입.
   token: ""
   # provider별 내부 LGTM upstream(같은 네임스페이스 short DNS, host:port). 기본값은 이 차트가

@@ -2,7 +2,11 @@
 
 single_gateway는 Heimdall DB를 보지 않는다. upstream(Prometheus/Loki/Tempo) 주소는
 환경변수로 주입되며(차트 values.gateway.upstreams), provider별 native query API로 변환해
-호출한 뒤 결과를 §3.3.5.1 응답 형태(row_count/result_excerpt)로 정규화한다.
+호출한 뒤 결과를 §3.3.5.1 응답 형태(row_count/result_excerpt/rows)로 정규화한다.
+
+rows는 provider-faithful한 raw 행이다(metric 라벨+값, 로그 라인, trace 요약).
+RCA-semantic 변환(threshold/unit/downstream 등)은 게이트웨이 책임이 아니라 소비자
+번역 계층이 담당한다. 소비자 Evidence MCP가 rows를 필수로 요구하므로 노출한다.
 """
 from __future__ import annotations
 
@@ -67,7 +71,21 @@ def _labels(metric: dict) -> str:
     return "{" + inner + "}"
 
 
-def _prometheus(provider: str, query: str, start: datetime, end: datetime) -> dict:
+def _num(value):
+    # 숫자 문자열은 float으로, 그 외는 원형 보존.
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _cap(limit: int | None, default: int) -> int:
+    return limit if limit and limit > 0 else default
+
+
+def _prometheus(provider: str, query: str, start: datetime, end: datetime, limit: int | None) -> dict:
     body = _call(f"{_base(provider)}/api/v1/query_range", {
         "query": query,
         "start": start.timestamp(),
@@ -82,7 +100,19 @@ def _prometheus(provider: str, query: str, start: datetime, end: datetime) -> di
         pts = series[0].get("values") or []
         last = pts[-1][1] if pts else "?"
         excerpt = f"{name}{_labels(m)} = {last}"
-    return {"row_count": len(series), "result_excerpt": excerpt}
+    rows = []
+    for s in series[: _cap(limit, 50)]:
+        m = s.get("metric", {})
+        pts = s.get("values") or []
+        last_ts, last_val = pts[-1] if pts else (None, None)
+        rows.append({
+            "metric_name": m.get("__name__"),
+            "service": m.get("service_name") or m.get("service"),
+            "observed_value": _num(last_val),
+            "labels": m,
+            "timestamp": _num(last_ts),
+        })
+    return {"row_count": len(series), "result_excerpt": excerpt, "rows": rows}
 
 
 def _loki(provider: str, query: str, start: datetime, end: datetime, limit: int | None) -> dict:
@@ -94,14 +124,31 @@ def _loki(provider: str, query: str, start: datetime, end: datetime, limit: int 
         "direction": "backward",
     })
     streams = (body.get("data") or {}).get("result") or []
-    rows = sum(len(s.get("values") or []) for s in streams)
+    row_count = sum(len(s.get("values") or []) for s in streams)
     excerpt = None
     for s in streams:
         vals = s.get("values") or []
         if vals:
             excerpt = str(vals[0][1])[:200]
             break
-    return {"row_count": rows, "result_excerpt": excerpt}
+    cap = _cap(limit, 100)
+    rows = []
+    for s in streams:
+        st = s.get("stream", {})
+        for entry in s.get("values") or []:
+            if len(rows) >= cap:
+                break
+            ts, line = entry[0], entry[1]
+            rows.append({
+                "message": line,
+                "service": st.get("service_name") or st.get("service"),
+                "level": st.get("level") or st.get("detected_level"),
+                "labels": st,
+                "timestamp": ts,
+            })
+        if len(rows) >= cap:
+            break
+    return {"row_count": row_count, "result_excerpt": excerpt, "rows": rows}
 
 
 def _tempo(query: str, start: datetime, end: datetime, limit: int | None) -> dict:
@@ -116,13 +163,19 @@ def _tempo(query: str, start: datetime, end: datetime, limit: int | None) -> dic
     if traces:
         t = traces[0]
         excerpt = f"{t.get('rootServiceName', '?')} {t.get('traceID', '')}".strip()[:200]
-    return {"row_count": len(traces), "result_excerpt": excerpt}
+    rows = [{
+        "span": t.get("rootTraceName"),
+        "service": t.get("rootServiceName"),
+        "trace_id": t.get("traceID"),
+        "duration_ms": t.get("durationMs"),
+    } for t in traces[: _cap(limit, 20)]]
+    return {"row_count": len(traces), "result_excerpt": excerpt, "rows": rows}
 
 
 def run_query(provider: str, query: str, start: datetime, end: datetime, limit: int | None) -> dict:
-    """provider native query 실행 후 {row_count, result_excerpt} 반환."""
+    """provider native query 실행 후 {row_count, result_excerpt, rows} 반환."""
     if provider in ("prometheus", "mimir"):
-        return _prometheus(provider, query, start, end)
+        return _prometheus(provider, query, start, end, limit)
     if provider in ("loki", "k8s_events"):
         return _loki(provider, query, start, end, limit)
     if provider == "tempo":
