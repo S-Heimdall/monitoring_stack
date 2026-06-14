@@ -84,7 +84,10 @@
       > 0.25
     for: 3m
     labels:
-      severity: warning
+      # HEIM-181: critical로 격상. CPU throttling은 resource_patch로 교정하는 핵심 근본원인이고,
+      # AM inhibit(equal=[service_name,k8s_namespace_name])가 이 라벨 부재로 무관 critical에 의해
+      # 이 warning을 광역 억제 → incident 미생성. critical은 inhibit target(warning)이 아님.
+      severity: critical
       npo_category: container-resource
       scope: pod
     annotations:
