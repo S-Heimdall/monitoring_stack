@@ -2,8 +2,42 @@ apiVersion: v1
 entries:
   heimdall-monitoring:
   - apiVersion: v2
+    appVersion: 0.5.2
+    created: "2026-06-15T16:52:43.302269+09:00"
+    dependencies:
+    - alias: kps
+      condition: lgtm.prometheus.enabled
+      name: kube-prometheus-stack
+      repository: https://prometheus-community.github.io/helm-charts
+      version: 86.2.0
+    - alias: loki
+      condition: lgtm.loki.enabled
+      name: loki
+      repository: https://grafana.github.io/helm-charts
+      version: 7.0.0
+    - alias: tempo
+      condition: lgtm.tempo.enabled
+      name: tempo
+      repository: https://grafana.github.io/helm-charts
+      version: 1.24.4
+    - alias: alloy
+      condition: lgtm.alloy.enabled
+      name: alloy
+      repository: https://grafana.github.io/helm-charts
+      version: 1.8.2
+    description: Heimdall service-cluster LGTM monitoring stack and single gateway
+    digest: e0a428ec3531342b7dd17bb3abc2eb8be0e228161340768a277d3cc6d58ae604
+    home: https://github.com/S-Heimdall/monotoring_stack
+    name: heimdall-monitoring
+    sources:
+    - https://github.com/S-Heimdall/monotoring_stack
+    type: application
+    urls:
+    - https://s-heimdall.github.io/monitoring_stack/heimdall-monitoring-0.5.2.tgz
+    version: 0.5.2
+  - apiVersion: v2
     appVersion: 0.2.0
-    created: "2026-06-07T21:44:46.402667+09:00"
+    created: "2026-06-15T16:52:43.280446+09:00"
     dependencies:
     - alias: kps
       condition: lgtm.prometheus.enabled
@@ -33,6 +67,142 @@ entries:
     - https://github.com/S-Heimdall/monotoring_stack
     type: application
     urls:
-    - https://s-heimdall.github.io/monotoring_stack/heimdall-monitoring-0.2.4.tgz
+    - https://s-heimdall.github.io/monitoring_stack/heimdall-monitoring-0.2.4.tgz
     version: 0.2.4
-generated: "2026-06-07T21:44:46.355961+09:00"
+  - apiVersion: v2
+    appVersion: 0.2.0
+    created: "2026-06-15T16:52:43.259306+09:00"
+    dependencies:
+    - alias: kps
+      condition: lgtm.prometheus.enabled
+      name: kube-prometheus-stack
+      repository: https://prometheus-community.github.io/helm-charts
+      version: 86.2.0
+    - alias: loki
+      condition: lgtm.loki.enabled
+      name: loki
+      repository: https://grafana.github.io/helm-charts
+      version: 7.0.0
+    - alias: tempo
+      condition: lgtm.tempo.enabled
+      name: tempo
+      repository: https://grafana.github.io/helm-charts
+      version: 1.24.4
+    - alias: alloy
+      condition: lgtm.alloy.enabled
+      name: alloy
+      repository: https://grafana.github.io/helm-charts
+      version: 1.8.2
+    description: Heimdall service-cluster LGTM monitoring stack and single gateway
+    digest: 7804d6e33ce9e5754a1231958ee4c9542433a3614dfb140aa33bd2a669f29be0
+    home: https://github.com/S-Heimdall/monotoring_stack
+    name: heimdall-monitoring
+    sources:
+    - https://github.com/S-Heimdall/monotoring_stack
+    type: application
+    urls:
+    - https://s-heimdall.github.io/monitoring_stack/heimdall-monitoring-0.2.3.tgz
+    version: 0.2.3
+  - apiVersion: v2
+    appVersion: 0.2.0
+    created: "2026-06-15T16:52:43.238658+09:00"
+    dependencies:
+    - alias: kps
+      condition: lgtm.prometheus.enabled
+      name: kube-prometheus-stack
+      repository: https://prometheus-community.github.io/helm-charts
+      version: 86.2.0
+    - alias: loki
+      condition: lgtm.loki.enabled
+      name: loki
+      repository: https://grafana.github.io/helm-charts
+      version: 7.0.0
+    - alias: tempo
+      condition: lgtm.tempo.enabled
+      name: tempo
+      repository: https://grafana.github.io/helm-charts
+      version: 1.24.4
+    - alias: alloy
+      condition: lgtm.alloy.enabled
+      name: alloy
+      repository: https://grafana.github.io/helm-charts
+      version: 1.8.2
+    description: Heimdall service-cluster LGTM monitoring stack and single gateway
+    digest: 0036398ceec47e64bbcbbe42c71ad68ac6891f2727f15133a45af3aa69daff52
+    home: https://github.com/S-Heimdall/monotoring_stack
+    name: heimdall-monitoring
+    sources:
+    - https://github.com/S-Heimdall/monotoring_stack
+    type: application
+    urls:
+    - https://s-heimdall.github.io/monitoring_stack/heimdall-monitoring-0.2.2.tgz
+    version: 0.2.2
+  - apiVersion: v2
+    appVersion: 0.2.0
+    created: "2026-06-15T16:52:43.217303+09:00"
+    dependencies:
+    - alias: kps
+      condition: lgtm.prometheus.enabled
+      name: kube-prometheus-stack
+      repository: https://prometheus-community.github.io/helm-charts
+      version: 86.2.0
+    - alias: loki
+      condition: lgtm.loki.enabled
+      name: loki
+      repository: https://grafana.github.io/helm-charts
+      version: 7.0.0
+    - alias: tempo
+      condition: lgtm.tempo.enabled
+      name: tempo
+      repository: https://grafana.github.io/helm-charts
+      version: 1.24.4
+    - alias: alloy
+      condition: lgtm.alloy.enabled
+      name: alloy
+      repository: https://grafana.github.io/helm-charts
+      version: 1.8.2
+    description: Heimdall service-cluster LGTM monitoring stack and single gateway
+    digest: 490ef3677c64a2596225fa7f6d1a6e6565a11848d1bdbe49fb16092bf63041b2
+    home: https://github.com/S-Heimdall/monotoring_stack
+    name: heimdall-monitoring
+    sources:
+    - https://github.com/S-Heimdall/monotoring_stack
+    type: application
+    urls:
+    - https://s-heimdall.github.io/monitoring_stack/heimdall-monitoring-0.2.1.tgz
+    version: 0.2.1
+  - apiVersion: v2
+    appVersion: 0.2.0
+    created: "2026-06-15T16:52:43.196068+09:00"
+    dependencies:
+    - alias: kps
+      condition: lgtm.prometheus.enabled
+      name: kube-prometheus-stack
+      repository: https://prometheus-community.github.io/helm-charts
+      version: 86.2.0
+    - alias: loki
+      condition: lgtm.loki.enabled
+      name: loki
+      repository: https://grafana.github.io/helm-charts
+      version: 7.0.0
+    - alias: tempo
+      condition: lgtm.tempo.enabled
+      name: tempo
+      repository: https://grafana.github.io/helm-charts
+      version: 1.24.4
+    - alias: alloy
+      condition: lgtm.alloy.enabled
+      name: alloy
+      repository: https://grafana.github.io/helm-charts
+      version: 1.8.2
+    description: Heimdall service-cluster LGTM monitoring stack and single gateway
+    digest: 7eed55a6256d55040a55f3675c8a9a0915239b553b3d27ad0dc8b7b91708f32c
+    home: https://github.com/S-Heimdall/monotoring_stack
+    name: heimdall-monitoring
+    sources:
+    - https://github.com/S-Heimdall/monotoring_stack
+    type: application
+    urls:
+    - https://s-heimdall.github.io/monitoring_stack/heimdall-monitoring-0.2.0.tgz
+    version: 0.2.0
+generated: "2026-06-15T16:52:43.173826+09:00"
