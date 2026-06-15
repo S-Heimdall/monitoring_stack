@@ -30,6 +30,12 @@ global:
 targetNamespaces:
   - otel-demo
 
+# 트레이스 샘플링. Alloy 가 Tempo 로 보내는 트레이스를 확률 샘플링한다(templates/alloy-config.yaml).
+# RED(traces_span_metrics_*)·service-graph 메트릭은 상류 spanmetrics 커넥터 산출이라 무영향 —
+# 알림/SLO 정확도는 유지되고 Tempo 저장/부하만 절감된다. 부하 큰 클러스터는 낮춰라(100 이면 전량).
+tracing:
+  samplingPercentage: 25
+
 # ─────────────────────────────────────────────
 # single_gateway : AIOps telemetry-query-gateway 가 PrivateLink 로 호출하는 단일 진입점.
 # POST /internal/telemetry/query (명세 §3.3.5.1) 로 provider별 내부 LGTM 에 read-only 라우팅.
@@ -259,10 +265,13 @@ kps:
       retention: 24h
       replicas: 1
       # 소스 클러스터/프로젝트 식별 라벨(외부로 나가는 alert/remote-write 에 부착).
-      # cluster 는 설치 시 --set 으로 채운다: kps.prometheus.prometheusSpec.externalLabels.cluster
+      # 둘 다 설치(클러스터 등록) 시 --set 으로 주입한다. 비워두면 라벨이 빈 값으로 나가
+      # NPO 가 소스를 식별 못 하므로, 등록 절차에서 실값으로 채운다.
+      #   --set kps.prometheus.prometheusSpec.externalLabels.cluster=<cluster-id>
+      #   --set kps.prometheus.prometheusSpec.externalLabels.heimdall_project=<project-id>
       externalLabels:
         cluster: ""
-        heimdall_project: otel-demo
+        heimdall_project: ""
       resources:
         requests:
           cpu: 200m
