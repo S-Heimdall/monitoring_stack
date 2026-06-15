@@ -73,15 +73,25 @@
       summary: "{{ $labels.pod }}/{{ $labels.container }} — 메모리 압박"
       description: "{{ $labels.pod }}/{{ $labels.container }} — 메모리/limit > 95%가 15분간 지속. 현재 {{ $value | humanizePercentage }}."
   - alert: ContainerCPUThrottling
+    # HEIM-187: label_replace로 container→service_name, namespace→k8s_namespace_name 부여.
+    # 미부여 시 (1) incident-manager가 trigger_service를 못 채워 null → Agent IncidentFinalizedEvent
+    # 검증 실패로 DLQ, (2) AM inhibit(equal=[service_name,k8s_namespace_name])가 둘 다 empty라
+    # 무관 critical과 equal-매칭돼 광역 억제. (payment throttling → service_name=payment)
     expr: |
-      sum by (namespace, pod, container) (
-        rate(container_cpu_cfs_throttled_periods_total{namespace=~"__TARGET_NS__", container!=""}[2m])
+      label_replace(
+        label_replace(
+          sum by (namespace, pod, container) (
+            rate(container_cpu_cfs_throttled_periods_total{namespace=~"__TARGET_NS__", container!=""}[2m])
+          )
+          /
+          sum by (namespace, pod, container) (
+            rate(container_cpu_cfs_periods_total{namespace=~"__TARGET_NS__", container!=""}[2m])
+          )
+          > 0.25,
+          "service_name", "$1", "container", "(.+)"
+        ),
+        "k8s_namespace_name", "$1", "namespace", "(.+)"
       )
-      /
-      sum by (namespace, pod, container) (
-        rate(container_cpu_cfs_periods_total{namespace=~"__TARGET_NS__", container!=""}[2m])
-      )
-      > 0.25
     for: 3m
     labels:
       # HEIM-181: critical로 격상. CPU throttling은 resource_patch로 교정하는 핵심 근본원인이고,
