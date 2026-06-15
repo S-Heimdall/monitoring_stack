@@ -128,7 +128,18 @@ data:
       output {
         metrics = [otelcol.exporter.otlphttp.prometheus.input]
         logs    = [otelcol.exporter.loki.default.input]
-        traces  = [otelcol.exporter.otlp.tempo.input]
+        // 트레이스만 샘플러를 거쳐 Tempo 로. metrics/logs 는 그대로.
+        traces  = [otelcol.processor.probabilistic_sampler.sample.input]
+      }
+    }
+
+    // HEIM-99: 트레이스 확률 샘플링. RED(traces_span_metrics_*)·service-graph 는 상류 spanmetrics
+    // 커넥터 산출이라 무영향. 부하 큰 클러스터는 tracing.samplingPercentage 를 낮춰 Tempo 부하/저장 절감
+    // (100 이면 전량 저장). 기본 25%.
+    otelcol.processor.probabilistic_sampler "sample" {
+      sampling_percentage = {{ .Values.tracing.samplingPercentage | default 25 }}
+      output {
+        traces = [otelcol.exporter.otlp.tempo.input]
       }
     }
 
