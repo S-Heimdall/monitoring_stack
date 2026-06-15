@@ -399,6 +399,15 @@ tempo:
         metrics_generator:
           processors:
             - service-graphs
+  # metrics_generator(service-graphs) + 트레이스 인입으로 tempo 워킹셋이 부하 시 ~2Gi,
+  # 기동 WAL replay 시 ~2.45Gi다(실측). limit 없으면 작은 노드를 시스템 OOM으로 죽인다.
+  # 2.5Gi로 cap → 초과해도 tempo만 cgroup OOMKill(노드 안전). 그 이하는 기동 replay에 부족.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 1Gi
+    limits:
+      memory: 2560Mi
   persistence:
     enabled: true
     size: 5Gi
