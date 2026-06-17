@@ -17,7 +17,8 @@ def _patch_upstream(monkeypatch, payload, status=200):
 
 def test_prometheus_query(monkeypatch):
     _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": [
-        {"metric": {"__name__": "up", "job": "checkout", "service_name": "checkout"},
+        {"metric": {"__name__": "up", "job": "checkout", "service_name": "checkout",
+                    "k8s_namespace_name": "otel-demo", "pod": "checkout-abc", "container": "checkout"},
          "values": [[1, "1"], [2, "1"]]},
     ]}})
     r = client.post("/internal/telemetry/query", json={
@@ -33,6 +34,9 @@ def test_prometheus_query(monkeypatch):
     row = d["rows"][0]
     assert row["metric_name"] == "up"
     assert row["service"] == "checkout"
+    assert row["namespace"] == "otel-demo"
+    assert row["pod"] == "checkout-abc"
+    assert row["container"] == "checkout"
     assert row["observed_value"] == 1.0
     # AIOps측 필드는 single_gateway에서 null
     assert d["telemetry_connection_id"] is None
@@ -60,7 +64,8 @@ def test_prometheus_range_summary(monkeypatch):
 
 def test_loki_query(monkeypatch):
     _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "streams", "result": [
-        {"stream": {"app": "checkout", "service_name": "checkout", "level": "warning"},
+        {"stream": {"app": "checkout", "service_name": "checkout", "k8s_namespace_name": "otel-demo",
+                    "k8s_pod_name": "checkout-abc", "k8s_container_name": "checkout", "level": "warning"},
          "values": [["1", "payment timeout"], ["2", "retry"]]},
     ]}})
     r = client.post("/internal/telemetry/query", json={
@@ -72,6 +77,9 @@ def test_loki_query(monkeypatch):
     assert len(d["rows"]) == 2
     assert d["rows"][0]["message"] == "payment timeout"
     assert d["rows"][0]["service"] == "checkout"
+    assert d["rows"][0]["namespace"] == "otel-demo"
+    assert d["rows"][0]["pod"] == "checkout-abc"
+    assert d["rows"][0]["container"] == "checkout"
     assert d["rows"][0]["level"] == "warning"
 
 
@@ -89,7 +97,7 @@ def test_loki_rows_capped_by_limit(monkeypatch):
 def test_tempo_query(monkeypatch):
     _patch_upstream(monkeypatch, {"traces": [
         {"traceID": "abc123", "rootServiceName": "checkout", "rootTraceName": "POST /checkout",
-         "durationMs": 3200},
+         "rootServiceNamespace": "otel-demo", "durationMs": 3200},
     ]})
     r = client.post("/internal/telemetry/query", json={
         "signal": "traces", "provider": "tempo", "query": "{}", "time_window": WINDOW})
@@ -98,19 +106,25 @@ def test_tempo_query(monkeypatch):
     assert "checkout" in d["result_excerpt"]
     assert len(d["rows"]) == 1
     assert d["rows"][0]["service"] == "checkout"
+    assert d["rows"][0]["namespace"] == "otel-demo"
     assert d["rows"][0]["span"] == "POST /checkout"
     assert d["rows"][0]["trace_id"] == "abc123"
+    assert d["rows"][0]["labels"]["traceID"] == "abc123"
 
 
 def test_kubernetes_events_routes_to_loki(monkeypatch):
     _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "streams", "result": [
-        {"stream": {"reason": "ScalingReplicaSet"}, "values": [["1", "Scaled up"]]},
+        {"stream": {"reason": "ScalingReplicaSet", "namespace": "otel-demo", "pod": "payment-abc",
+                    "container": "payment"}, "values": [["1", "Scaled up"]]},
     ]}})
     r = client.post("/internal/telemetry/query", json={
         "signal": "kubernetes_events", "provider": "k8s_events",
         "query": '{job="kubernetes-events"}', "time_window": WINDOW})
     assert r.status_code == 200
-    assert r.json()["data"]["row_count"] == 1
+    row = r.json()["data"]["rows"][0]
+    assert row["namespace"] == "otel-demo"
+    assert row["pod"] == "payment-abc"
+    assert row["container"] == "payment"
 
 
 def test_unknown_provider_404(monkeypatch):
