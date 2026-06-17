@@ -104,14 +104,28 @@ def _prometheus(provider: str, query: str, start: datetime, end: datetime, limit
     for s in series[: _cap(limit, 50)]:
         m = s.get("metric", {})
         pts = s.get("values") or []
-        last_ts, last_val = pts[-1] if pts else (None, None)
-        rows.append({
+        # range samples 전체로 요약한다 — 마지막 1점만 보면 "지속됐는가"(sustained)를
+        # 판단할 수 없어 RCA falsification이 single point라 inconclusive로 빠진다(HEIM-249).
+        nums = [n for n in (_num(v) for _, v in pts) if isinstance(n, (int, float))]
+        row = {
             "metric_name": m.get("__name__"),
             "service": m.get("service_name") or m.get("service"),
-            "observed_value": _num(last_val),
             "labels": m,
-            "timestamp": _num(last_ts),
-        })
+            "sample_count": len(pts),
+            "series_start": _num(pts[0][0]) if pts else None,
+            "series_end": _num(pts[-1][0]) if pts else None,
+            "timestamp": _num(pts[-1][0]) if pts else None,
+        }
+        if nums:
+            # observed_value=last는 기존 소비자 호환용으로 유지하고, max/min/avg를 함께 노출한다.
+            row["observed_value"] = nums[-1]
+            row["last_value"] = nums[-1]
+            row["max_value"] = max(nums)
+            row["min_value"] = min(nums)
+            row["avg_value"] = round(sum(nums) / len(nums), 6)
+        else:
+            row["observed_value"] = _num(pts[-1][1]) if pts else None
+        rows.append(row)
     return {"row_count": len(series), "result_excerpt": excerpt, "rows": rows}
 
 
