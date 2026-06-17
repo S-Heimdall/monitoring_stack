@@ -56,14 +56,20 @@
   rules:
   - alert: ContainerMemoryPressure
     expr: |
-      sum by (namespace, pod, container) (
-        container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""}
+      label_replace(
+        label_replace(
+          sum by (namespace, pod, container) (
+            container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""}
+          )
+          /
+          sum by (namespace, pod, container) (
+            kube_pod_container_resource_limits{namespace=~"__TARGET_NS__", resource="memory"}
+          )
+          > 0.95,
+          "service_name", "$1", "container", "(.+)"
+        ),
+        "k8s_namespace_name", "$1", "namespace", "(.+)"
       )
-      /
-      sum by (namespace, pod, container) (
-        kube_pod_container_resource_limits{namespace=~"__TARGET_NS__", resource="memory"}
-      )
-      > 0.95
     for: 15m
     labels:
       severity: warning
@@ -108,10 +114,16 @@
   rules:
   - alert: PodOOMKilled
     expr: |
-      kube_pod_container_status_terminated_reason{
-        namespace=~"__TARGET_NS__",
-        reason="OOMKilled"
-      } > 0
+      label_replace(
+        label_replace(
+          kube_pod_container_status_terminated_reason{
+            namespace=~"__TARGET_NS__",
+            reason="OOMKilled"
+          } > 0,
+          "service_name", "$1", "container", "(.+)"
+        ),
+        "k8s_namespace_name", "$1", "namespace", "(.+)"
+      )
     for: 0m
     labels:
       severity: critical
@@ -122,7 +134,13 @@
       description: "{{ $labels.pod }}/{{ $labels.container }} — OOMKilled 종료 발생. 메모리 limit 초과 또는 노드 압박."
   - alert: PodCrashLooping
     expr: |
-      increase(kube_pod_container_status_restarts_total{namespace=~"__TARGET_NS__"}[15m]) > 3
+      label_replace(
+        label_replace(
+          increase(kube_pod_container_status_restarts_total{namespace=~"__TARGET_NS__"}[15m]) > 3,
+          "service_name", "$1", "container", "(.+)"
+        ),
+        "k8s_namespace_name", "$1", "namespace", "(.+)"
+      )
     for: 2m
     labels:
       severity: critical
@@ -133,7 +151,13 @@
       description: "{{ $labels.pod }}/{{ $labels.container }} — 15분간 재시작 > 3회가 2분간 지속. 현재 {{ $value }}회."
   - alert: DeploymentReplicasUnavailable
     expr: |
-      kube_deployment_status_replicas_unavailable{namespace=~"__TARGET_NS__"} > 0
+      label_replace(
+        label_replace(
+          kube_deployment_status_replicas_unavailable{namespace=~"__TARGET_NS__"} > 0,
+          "service_name", "$1", "deployment", "(.+)"
+        ),
+        "k8s_namespace_name", "$1", "namespace", "(.+)"
+      )
     for: 2m
     labels:
       severity: warning
@@ -144,9 +168,15 @@
       description: "{{ $labels.deployment }} — unavailable replica > 0이 2분간 지속. desired vs available 불일치."
   - alert: PodNotReady
     expr: |
-      sum by (namespace, pod) (
-        kube_pod_status_ready{namespace=~"__TARGET_NS__", condition="false"}
-      ) > 0
+      label_replace(
+        label_replace(
+          sum by (namespace, pod) (
+            kube_pod_status_ready{namespace=~"__TARGET_NS__", condition="false"}
+          ) > 0,
+          "service_name", "$1", "pod", "([^-]+).*"
+        ),
+        "k8s_namespace_name", "$1", "namespace", "(.+)"
+      )
     for: 3m
     labels:
       severity: warning
@@ -157,7 +187,13 @@
       description: "{{ $labels.pod }} — Ready=false가 3분간 지속."
   - alert: PodPending
     expr: |
-      kube_pod_status_phase{namespace=~"__TARGET_NS__", phase="Pending"} == 1
+      label_replace(
+        label_replace(
+          kube_pod_status_phase{namespace=~"__TARGET_NS__", phase="Pending"} == 1,
+          "service_name", "$1", "pod", "([^-]+).*"
+        ),
+        "k8s_namespace_name", "$1", "namespace", "(.+)"
+      )
     for: 3m
     labels:
       severity: warning
@@ -242,6 +278,7 @@
       npo_category: slo-burn
       scope: service
       service_name: checkout
+      k8s_namespace_name: __TARGET_NS__
     annotations:
       summary: "checkout — 에러버짓 빠른 소진(SLO 위반 임박)"
       description: "checkout 가용성 SLO(목표 99%)의 에러버짓을 14.4x 속도로 소진 중(5m·1h 에러율 동시 > 14.4%). 이대로면 곧 SLO 위반."
@@ -280,19 +317,25 @@
     # 높음(>85%) "그리고" 실제 증가 중(20분간 limit의 3% 이상 상승)일 때만.
     # JVM 등 정상적으로 limit 근처에 상주하는 컨테이너(kafka ~91%)의 상시 오탐 방지.
     expr: |
-      (
-        sum by (namespace, pod, container) (container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""})
-        / sum by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=~"__TARGET_NS__", resource="memory"})
-        > 0.85
-      )
-      and
-      (
-        sum by (namespace, pod, container) (
-          container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""}
-          - container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""} offset 20m
-        )
-        / sum by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=~"__TARGET_NS__", resource="memory"})
-        > 0.03
+      label_replace(
+        label_replace(
+          (
+            sum by (namespace, pod, container) (container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""})
+            / sum by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=~"__TARGET_NS__", resource="memory"})
+            > 0.85
+          )
+          and
+          (
+            sum by (namespace, pod, container) (
+              container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""}
+              - container_memory_working_set_bytes{namespace=~"__TARGET_NS__", container!=""} offset 20m
+            )
+            / sum by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=~"__TARGET_NS__", resource="memory"})
+            > 0.03
+          ),
+          "service_name", "$1", "container", "(.+)"
+        ),
+        "k8s_namespace_name", "$1", "namespace", "(.+)"
       )
     for: 10m
     labels:
@@ -329,13 +372,19 @@
   rules:
   - alert: HPAScaleOutBlocked
     expr: |
-      (
-        kube_horizontalpodautoscaler_status_condition{namespace=~"__TARGET_NS__", condition="ScalingLimited", status="true"} == 1
-      )
-      and on (horizontalpodautoscaler, namespace)
-      (
-        kube_horizontalpodautoscaler_status_current_replicas{namespace=~"__TARGET_NS__"}
-        >= kube_horizontalpodautoscaler_spec_max_replicas{namespace=~"__TARGET_NS__"}
+      label_replace(
+        label_replace(
+          (
+            kube_horizontalpodautoscaler_status_condition{namespace=~"__TARGET_NS__", condition="ScalingLimited", status="true"} == 1
+          )
+          and on (horizontalpodautoscaler, namespace)
+          (
+            kube_horizontalpodautoscaler_status_current_replicas{namespace=~"__TARGET_NS__"}
+            >= kube_horizontalpodautoscaler_spec_max_replicas{namespace=~"__TARGET_NS__"}
+          ),
+          "service_name", "$1", "horizontalpodautoscaler", "(.+)"
+        ),
+        "k8s_namespace_name", "$1", "namespace", "(.+)"
       )
     for: 2m
     labels:

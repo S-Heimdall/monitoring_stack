@@ -34,10 +34,32 @@ Heimdall_API_기능_명세 §3.3.5.1(`POST /internal/telemetry/query`)을 구현
   "result_ref": null,
   "result_excerpt": "payment timeout after 3000ms",
   "row_count": 12,
+  "rows": [
+    {
+      "service": "checkout",
+      "namespace": "otel-demo",
+      "pod": "checkout-abc",
+      "container": "checkout",
+      "labels": {"service_name": "checkout", "k8s_namespace_name": "otel-demo"}
+    }
+  ],
   "started_at": "...", "completed_at": "..."
 }}
 ```
 `telemetry_connection_id` / `result_ref`는 AIOps측이 채우므로 single_gateway에선 null.
+
+### Agent evidence label contract
+`rows`는 provider 원본 라벨을 `labels`에 보존하면서 Agent evidence pack이 공통으로 읽을 수 있는 필드를 함께 노출한다.
+
+| provider | query label 기준 | row 공통 필드 |
+| --- | --- | --- |
+| `prometheus`/`mimir` service RED | `service_name`, `k8s_namespace_name` | `service`, `namespace`, `labels`, `sample_count`, `observed_value`, `max_value` |
+| `prometheus`/`mimir` infra/container | `namespace`, `pod`, `container` | `namespace`, `pod`, `container`, `labels`, range summary |
+| `loki` | `service_name`, `k8s_namespace_name`, `k8s_pod_name`, `k8s_container_name` | `message`, `service`, `namespace`, `pod`, `container`, `level`, `labels` |
+| `tempo` | TraceQL/search의 root service | `service`, `namespace`, `span`, `trace_id`, `duration_ms`, `labels` |
+| `k8s_events` | Loki에 적재된 event stream | `message`, `namespace`, `pod`, `container`, `labels` |
+
+Agent RCA가 checkout 증상과 payment 원인을 연결할 수 있도록 gateway는 provider별 row/excerpt를 비워서 성공 처리하지 않고, upstream이 반환한 결과를 위 공통 필드와 raw `labels`로 같이 전달한다.
 
 에러: 400 `TELEMETRY_QUERY_INVALID` / 403 `INTERNAL_CALL_FORBIDDEN` /
 404 `TELEMETRY_CONNECTION_NOT_FOUND` / 502 `TELEMETRY_PROVIDER_QUERY_FAILED`.

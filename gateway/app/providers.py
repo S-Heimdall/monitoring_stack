@@ -81,6 +81,22 @@ def _num(value):
         return value
 
 
+def _service(labels: dict) -> str | None:
+    return labels.get("service_name") or labels.get("service") or labels.get("app")
+
+
+def _namespace(labels: dict) -> str | None:
+    return labels.get("k8s_namespace_name") or labels.get("namespace")
+
+
+def _pod(labels: dict) -> str | None:
+    return labels.get("k8s_pod_name") or labels.get("pod")
+
+
+def _container(labels: dict) -> str | None:
+    return labels.get("k8s_container_name") or labels.get("container")
+
+
 def _cap(limit: int | None, default: int) -> int:
     return limit if limit and limit > 0 else default
 
@@ -109,7 +125,10 @@ def _prometheus(provider: str, query: str, start: datetime, end: datetime, limit
         nums = [n for n in (_num(v) for _, v in pts) if isinstance(n, (int, float))]
         row = {
             "metric_name": m.get("__name__"),
-            "service": m.get("service_name") or m.get("service"),
+            "service": _service(m),
+            "namespace": _namespace(m),
+            "pod": _pod(m),
+            "container": _container(m),
             "labels": m,
             "sample_count": len(pts),
             "series_start": _num(pts[0][0]) if pts else None,
@@ -155,7 +174,10 @@ def _loki(provider: str, query: str, start: datetime, end: datetime, limit: int 
             ts, line = entry[0], entry[1]
             rows.append({
                 "message": line,
-                "service": st.get("service_name") or st.get("service"),
+                "service": _service(st),
+                "namespace": _namespace(st),
+                "pod": _pod(st),
+                "container": _container(st),
                 "level": st.get("level") or st.get("detected_level"),
                 "labels": st,
                 "timestamp": ts,
@@ -180,8 +202,10 @@ def _tempo(query: str, start: datetime, end: datetime, limit: int | None) -> dic
     rows = [{
         "span": t.get("rootTraceName"),
         "service": t.get("rootServiceName"),
+        "namespace": t.get("rootServiceNamespace"),
         "trace_id": t.get("traceID"),
         "duration_ms": t.get("durationMs"),
+        "labels": t,
     } for t in traces[: _cap(limit, 20)]]
     return {"row_count": len(traces), "result_excerpt": excerpt, "rows": rows}
 
