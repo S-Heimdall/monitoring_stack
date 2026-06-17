@@ -40,6 +40,24 @@ def test_prometheus_query(monkeypatch):
     assert d["started_at"] and d["completed_at"]
 
 
+def test_prometheus_range_summary(monkeypatch):
+    # range samples를 sample_count/max/min/avg로 요약해 "지속됐는가"를 판단 가능케 한다(HEIM-249).
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": [
+        {"metric": {"__name__": "throttle", "service_name": "payment"},
+         "values": [[1, "0.2"], [2, "0.9"], [3, "1.0"], [4, "0.8"]]},
+    ]}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "metrics", "provider": "prometheus", "query": "throttle", "time_window": WINDOW})
+    row = r.json()["data"]["rows"][0]
+    assert row["sample_count"] == 4
+    assert row["observed_value"] == 0.8  # backward-compat: last value
+    assert row["last_value"] == 0.8
+    assert row["max_value"] == 1.0
+    assert row["min_value"] == 0.2
+    assert abs(row["avg_value"] - 0.725) < 1e-6
+    assert row["series_start"] == 1.0 and row["series_end"] == 4.0
+
+
 def test_loki_query(monkeypatch):
     _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "streams", "result": [
         {"stream": {"app": "checkout", "service_name": "checkout", "level": "warning"},
