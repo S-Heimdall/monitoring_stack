@@ -31,7 +31,7 @@ alert 는 Alertmanager → 원격 Heimdall webhook(push), telemetry 는 read-gat
 GitHub Pages 가 활성화되면 Pages URL 을 Helm 저장소로 사용한다.
 
 ```bash
-helm repo add heimdall https://s-heimdall.github.io/monotoring_stack
+helm repo add heimdall https://s-heimdall.github.io/monitoring_stack
 helm repo update
 
 helm upgrade --install heimdall-monitoring heimdall/heimdall-monitoring \
