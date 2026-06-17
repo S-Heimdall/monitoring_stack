@@ -269,6 +269,7 @@ async def telemetry_query(request: Request) -> JSONResponse:
         return JSONResponse(status_code=response.status_code, content=payload)
 
     if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
-        payload["data"].setdefault("telemetry_connection_id", connection.connection_id)
+        if not payload["data"].get("telemetry_connection_id"):
+            payload["data"]["telemetry_connection_id"] = connection.connection_id
 
     return JSONResponse(status_code=response.status_code, content=payload)
