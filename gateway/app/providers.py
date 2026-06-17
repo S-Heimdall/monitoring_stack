@@ -11,6 +11,7 @@ RCA-semantic 변환(threshold/unit/downstream 등)은 게이트웨이 책임이 
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 
 import httpx
@@ -21,6 +22,24 @@ HTTP_TIMEOUT = float(os.environ.get("QUERY_TIMEOUT_SECONDS", "20"))
 
 class ProviderError(Exception):
     """upstream 조회 실패 — 502 TELEMETRY_PROVIDER_QUERY_FAILED로 매핑."""
+
+
+class ProviderTimeoutError(ProviderError):
+    """upstream timeout — telemetry error detail에서 provider_timeout으로 구분."""
+
+
+LABEL_ALIASES = {
+    "service_name": "service",
+    "service": "service",
+    "app": "service",
+    "k8s_namespace_name": "namespace",
+    "namespace": "namespace",
+    "k8s_pod_name": "pod",
+    "pod": "pod",
+    "k8s_container_name": "container",
+    "container": "container",
+}
+MISMATCH_PRONE_LABELS = {"service", "app", "namespace", "pod", "container"}
 
 
 def _upstreams() -> dict[str, str]:
@@ -48,14 +67,19 @@ def _get(url: str, params: dict) -> httpx.Response:
 def _call(url: str, params: dict) -> dict:
     try:
         r = _get(url, params)
+    except httpx.TimeoutException as exc:
+        raise ProviderTimeoutError(str(exc)) from exc
     except httpx.HTTPError as exc:
         raise ProviderError(str(exc)) from exc
     if r.status_code >= 400:
         raise ProviderError(f"upstream {r.status_code}: {r.text[:200]}")
     try:
-        return r.json()
+        body = r.json()
     except ValueError as exc:
         raise ProviderError(f"non-json upstream response: {exc}") from exc
+    if body.get("status") == "error":
+        raise ProviderError(f"{body.get('errorType', 'error')}: {body.get('error', '')}"[:200])
+    return body
 
 
 def _step_seconds(start: datetime, end: datetime) -> int:
@@ -101,12 +125,57 @@ def _cap(limit: int | None, default: int) -> int:
     return limit if limit and limit > 0 else default
 
 
+def normalize_query_labels(query: str) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for label, value in re.findall(r'([a-zA-Z_:][\w:]*)\s*(?:=|=~|!=|!~)\s*"([^"]*)"', query):
+        labels.setdefault(LABEL_ALIASES.get(label, label), value)
+    return labels
+
+
+def _raw_query_labels(query: str) -> set[str]:
+    return {
+        label
+        for label, _ in re.findall(r'([a-zA-Z_:][\w:]*)\s*(?:=|=~|!=|!~)\s*"([^"]*)"', query)
+    }
+
+
+def _label_mismatch_suspected(query: str) -> bool:
+    return bool(_raw_query_labels(query) & MISMATCH_PRONE_LABELS)
+
+
+def classify_result(provider: str, query: str, result: dict) -> tuple[str, str | None]:
+    row_count = int(result.get("row_count") or 0)
+    series_count = int(result.get("_series_count") or row_count)
+    rows = result.get("rows") or []
+    has_sampled_row = any(
+        row.get("sample_count", 1) > 0 and row.get("observed_value", row.get("message", row.get("trace_id"))) is not None
+        for row in rows
+    )
+    if row_count > 0 and has_sampled_row:
+        return "ok", None
+    if series_count > 0:
+        return "empty", "no_rows_in_window"
+    if _label_mismatch_suspected(query):
+        return "empty", "label_mismatch_suspected"
+    return "empty", "no_series_matched"
+
+
+def error_empty_reason(exc: Exception) -> str:
+    if isinstance(exc, ProviderTimeoutError):
+        return "provider_timeout"
+    message = str(exc).lower()
+    if any(token in message for token in ("bad_data", "parse", "unsupported", "invalid parameter")):
+        return "unsupported_query"
+    return "unsupported_query"
+
+
 def _prometheus(provider: str, query: str, start: datetime, end: datetime, limit: int | None) -> dict:
+    step_seconds = _step_seconds(start, end)
     body = _call(f"{_base(provider)}/api/v1/query_range", {
         "query": query,
         "start": start.timestamp(),
         "end": end.timestamp(),
-        "step": f"{_step_seconds(start, end)}s",
+        "step": f"{step_seconds}s",
     })
     series = (body.get("data") or {}).get("result") or []
     excerpt = None
@@ -145,7 +214,13 @@ def _prometheus(provider: str, query: str, start: datetime, end: datetime, limit
         else:
             row["observed_value"] = _num(pts[-1][1]) if pts else None
         rows.append(row)
-    return {"row_count": len(series), "result_excerpt": excerpt, "rows": rows}
+    return {
+        "row_count": len(series),
+        "result_excerpt": excerpt,
+        "rows": rows,
+        "_series_count": len(series),
+        "_step_seconds": step_seconds,
+    }
 
 
 def _loki(provider: str, query: str, start: datetime, end: datetime, limit: int | None) -> dict:
@@ -184,7 +259,12 @@ def _loki(provider: str, query: str, start: datetime, end: datetime, limit: int 
             })
         if len(rows) >= cap:
             break
-    return {"row_count": row_count, "result_excerpt": excerpt, "rows": rows}
+    return {
+        "row_count": row_count,
+        "result_excerpt": excerpt,
+        "rows": rows,
+        "_series_count": len(streams),
+    }
 
 
 def _tempo(query: str, start: datetime, end: datetime, limit: int | None) -> dict:
@@ -207,7 +287,12 @@ def _tempo(query: str, start: datetime, end: datetime, limit: int | None) -> dic
         "duration_ms": t.get("durationMs"),
         "labels": t,
     } for t in traces[: _cap(limit, 20)]]
-    return {"row_count": len(traces), "result_excerpt": excerpt, "rows": rows}
+    return {
+        "row_count": len(traces),
+        "result_excerpt": excerpt,
+        "rows": rows,
+        "_series_count": len(traces),
+    }
 
 
 def run_query(provider: str, query: str, start: datetime, end: datetime, limit: int | None) -> dict:

@@ -27,6 +27,8 @@ def test_prometheus_query(monkeypatch):
     d = r.json()["data"]
     assert d["provider"] == "prometheus"
     assert d["status"] == "pass"
+    assert d["data_status"] == "ok"
+    assert d["empty_reason"] is None
     assert d["row_count"] == 1
     assert "up" in d["result_excerpt"]
     # rows: provider-faithful 행 노출(소비자 Evidence MCP 필수).
@@ -41,6 +43,10 @@ def test_prometheus_query(monkeypatch):
     # AIOps측 필드는 single_gateway에서 null
     assert d["telemetry_connection_id"] is None
     assert d["result_ref"] is None
+    assert d["query_time_range"]["from"] == WINDOW["from"]
+    assert d["query_time_range"]["to"] == WINDOW["to"]
+    assert d["query_time_range"]["step_seconds"] == 15
+    assert d["normalized_labels"] == {}
     assert d["started_at"] and d["completed_at"]
 
 
@@ -60,6 +66,50 @@ def test_prometheus_range_summary(monkeypatch):
     assert row["min_value"] == 0.2
     assert abs(row["avg_value"] - 0.725) < 1e-6
     assert row["series_start"] == 1.0 and row["series_end"] == 4.0
+
+
+def test_prometheus_empty_no_series_contract(monkeypatch):
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": []}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "metrics", "provider": "prometheus", "query": "up", "time_window": WINDOW})
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["provider"] == "prometheus"
+    assert d["row_count"] == 0
+    assert d["rows"] == []
+    assert d["data_status"] == "empty"
+    assert d["empty_reason"] == "no_series_matched"
+    assert d["query_time_range"]["step_seconds"] == 15
+
+
+def test_prometheus_empty_label_mismatch_contract(monkeypatch):
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": []}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "metrics",
+        "provider": "prometheus",
+        "query": 'http_server_duration{app="checkout",namespace="otel-demo"}',
+        "time_window": WINDOW,
+    })
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["data_status"] == "empty"
+    assert d["empty_reason"] == "label_mismatch_suspected"
+    assert d["normalized_labels"] == {"service": "checkout", "namespace": "otel-demo"}
+
+
+def test_prometheus_empty_no_rows_in_window_contract(monkeypatch):
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": [
+        {"metric": {"__name__": "up", "service_name": "checkout"}, "values": []},
+    ]}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "metrics", "provider": "prometheus", "query": "up", "time_window": WINDOW})
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["row_count"] == 1
+    assert len(d["rows"]) == 1
+    assert d["rows"][0]["sample_count"] == 0
+    assert d["data_status"] == "empty"
+    assert d["empty_reason"] == "no_rows_in_window"
 
 
 def test_loki_query(monkeypatch):
@@ -127,6 +177,22 @@ def test_kubernetes_events_routes_to_loki(monkeypatch):
     assert row["container"] == "payment"
 
 
+def test_kubernetes_events_empty_no_rows_in_window_contract(monkeypatch):
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "streams", "result": [
+        {"stream": {"reason": "ScalingReplicaSet", "namespace": "otel-demo"}, "values": []},
+    ]}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "kubernetes_events", "provider": "k8s_events",
+        "query": '{job="kubernetes-events"}', "time_window": WINDOW})
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["provider"] == "k8s_events"
+    assert d["row_count"] == 0
+    assert d["rows"] == []
+    assert d["data_status"] == "empty"
+    assert d["empty_reason"] == "no_rows_in_window"
+
+
 def test_unknown_provider_404(monkeypatch):
     r = client.post("/internal/telemetry/query", json={
         "signal": "traces", "provider": "jaeger", "query": "{}", "time_window": WINDOW})
@@ -155,6 +221,18 @@ def test_upstream_failure_502(monkeypatch):
         "signal": "metrics", "provider": "prometheus", "query": "up", "time_window": WINDOW})
     assert r.status_code == 502
     assert r.json()["detail"]["code"] == "TELEMETRY_PROVIDER_QUERY_FAILED"
+    assert r.json()["detail"]["data_status"] == "error"
+
+
+def test_upstream_timeout_504(monkeypatch):
+    def timeout(url, params):
+        raise httpx.ReadTimeout("timed out")
+    monkeypatch.setattr(providers, "_get", timeout)
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "metrics", "provider": "prometheus", "query": "up", "time_window": WINDOW})
+    assert r.status_code == 504
+    assert r.json()["detail"]["data_status"] == "error"
+    assert r.json()["detail"]["empty_reason"] == "provider_timeout"
 
 
 def test_auth_required_when_token_set(monkeypatch):

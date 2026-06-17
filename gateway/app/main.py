@@ -27,16 +27,37 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _iso(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _query_time_range(start: datetime, end: datetime, result: dict | None = None) -> dict:
+    payload = {"from": _iso(start), "to": _iso(end)}
+    if result and result.get("_step_seconds") is not None:
+        payload["step_seconds"] = result["_step_seconds"]
+    return payload
+
+
+def _error_detail(code: str, message: str, *, provider: str | None = None, empty_reason: str | None = None) -> dict:
+    return {
+        "code": code,
+        "message": message,
+        "data_status": "error",
+        "empty_reason": empty_reason,
+        "provider": provider,
+    }
+
+
 def _require_auth(authorization: str | None) -> None:
     token = os.environ.get("HEIMDALL_READ_TOKEN", "")
     if not token:
         # 토큰 미설정이면 인증 비활성(개발). 운영에선 secret으로 주입한다.
         return
     if authorization != f"Bearer {token}":
-        raise HTTPException(status_code=403, detail={
-            "code": "INTERNAL_CALL_FORBIDDEN",
-            "message": "invalid or missing bearer token",
-        })
+        raise HTTPException(
+            status_code=403,
+            detail=_error_detail("INTERNAL_CALL_FORBIDDEN", "invalid or missing bearer token"),
+        )
 
 
 @app.get("/healthz", include_in_schema=False)
@@ -77,33 +98,64 @@ def telemetry_query(
     _require_auth(authorization)
 
     if req.signal not in VALID_SIGNALS:
-        raise HTTPException(status_code=400, detail={
-            "code": "TELEMETRY_QUERY_INVALID", "message": f"unknown signal: {req.signal}"})
+        raise HTTPException(status_code=400, detail=_error_detail(
+            "TELEMETRY_QUERY_INVALID",
+            f"unknown signal: {req.signal}",
+            provider=req.provider,
+            empty_reason="unsupported_query",
+        ))
     if req.provider not in providers.SUPPORTED:
-        raise HTTPException(status_code=404, detail={
-            "code": "TELEMETRY_CONNECTION_NOT_FOUND",
-            "message": f"no connection for provider: {req.provider}"})
+        raise HTTPException(status_code=404, detail=_error_detail(
+            "TELEMETRY_CONNECTION_NOT_FOUND",
+            f"no connection for provider: {req.provider}",
+            provider=req.provider,
+            empty_reason="unsupported_query",
+        ))
     if not req.query.strip():
-        raise HTTPException(status_code=400, detail={
-            "code": "TELEMETRY_QUERY_INVALID", "message": "empty query"})
+        raise HTTPException(status_code=400, detail=_error_detail(
+            "TELEMETRY_QUERY_INVALID",
+            "empty query",
+            provider=req.provider,
+            empty_reason="unsupported_query",
+        ))
     start, end = req.time_window.from_, req.time_window.to
     if start >= end:
-        raise HTTPException(status_code=400, detail={
-            "code": "TELEMETRY_QUERY_INVALID", "message": "time_window.from must be before to"})
+        raise HTTPException(status_code=400, detail=_error_detail(
+            "TELEMETRY_QUERY_INVALID",
+            "time_window.from must be before to",
+            provider=req.provider,
+            empty_reason="unsupported_query",
+        ))
 
     started = _now()
     try:
         result = providers.run_query(req.provider, req.query, start, end, req.limit)
+    except providers.ProviderTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=_error_detail(
+            "TELEMETRY_PROVIDER_QUERY_FAILED",
+            str(exc)[:200],
+            provider=req.provider,
+            empty_reason="provider_timeout",
+        ))
     except providers.ProviderError as exc:
-        raise HTTPException(status_code=502, detail={
-            "code": "TELEMETRY_PROVIDER_QUERY_FAILED", "message": str(exc)[:200]})
+        raise HTTPException(status_code=502, detail=_error_detail(
+            "TELEMETRY_PROVIDER_QUERY_FAILED",
+            str(exc)[:200],
+            provider=req.provider,
+            empty_reason=providers.error_empty_reason(exc),
+        ))
     completed = _now()
+    data_status, empty_reason = providers.classify_result(req.provider, req.query, result)
 
     resp = TelemetryQueryResponse(
         provider=req.provider,
         status="pass",
         result_excerpt=result["result_excerpt"],
         row_count=result["row_count"],
+        data_status=data_status,
+        empty_reason=empty_reason,
+        query_time_range=_query_time_range(start, end, result),
+        normalized_labels=providers.normalize_query_labels(req.query),
         rows=result["rows"],
         started_at=started,
         completed_at=completed,
