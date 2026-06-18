@@ -251,3 +251,24 @@ def test_auth_pass_with_token(monkeypatch):
                     json={"signal": "metrics", "provider": "prometheus", "query": "up", "time_window": WINDOW})
     assert r.status_code == 200
     assert r.json()["data"]["row_count"] == 0
+
+
+# HEIM-235: 모든 에러가 안정 스키마 detail{code,message,data_status,empty_reason,provider}로 통일된다.
+def test_invalid_signal_uses_stable_schema():
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "bogus", "provider": "prometheus", "query": "up", "time_window": WINDOW})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "TELEMETRY_QUERY_INVALID"
+    assert detail["data_status"] == "error"
+    assert detail["empty_reason"] == "unsupported_query"
+
+
+def test_request_validation_normalized_to_stable_schema():
+    # 필수 필드 누락 → FastAPI 기본 422 리스트가 아니라 안정 스키마 400.
+    r = client.post("/internal/telemetry/query", json={"provider": "prometheus", "query": "up", "time_window": WINDOW})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "TELEMETRY_QUERY_INVALID"
+    assert detail["data_status"] == "error"
+    assert isinstance(detail["message"], str)
