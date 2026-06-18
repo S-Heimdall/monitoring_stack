@@ -80,6 +80,50 @@ def test_routes_query_to_single_gateway_with_configured_token(monkeypatch):
     ]
 
 
+def test_service_graph_dependency_queries_preserve_empty_contract(monkeypatch):
+    _set_connections(monkeypatch)
+    FakeAsyncClient.requests = []
+    FakeAsyncClient.response = httpx.Response(
+        200,
+        json={
+            "data": {
+                "provider": "prometheus",
+                "status": "pass",
+                "row_count": 0,
+                "rows": [],
+                "data_status": "empty",
+                "empty_reason": "no_series_matched",
+            }
+        },
+    )
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+
+    queries = {
+        "dep_inbound": 'sum(rate(traces_service_graph_request_total{server="checkout"}[5m])) by (client, server)',
+        "dep_outbound": 'sum(rate(traces_service_graph_request_total{client="checkout"}[5m])) by (client, server)',
+    }
+
+    for query_name, query in queries.items():
+        body = {
+            "cluster_id": "clu_otel001",
+            "signal": "metrics",
+            "provider": "prometheus",
+            "query": query,
+            "time_window": WINDOW,
+        }
+        response = client.post("/internal/telemetry/query", json=body)
+
+        assert response.status_code == 200, query_name
+        data = response.json()["data"]
+        assert data["telemetry_connection_id"] == "tel_otel_demo"
+        assert data["row_count"] == 0
+        assert data["rows"] == []
+        assert data["data_status"] == "empty"
+        assert data["empty_reason"] == "no_series_matched"
+
+    assert [request["json"]["query"] for request in FakeAsyncClient.requests] == list(queries.values())
+
+
 def test_missing_connection_returns_404(monkeypatch):
     _set_connections(monkeypatch)
 
