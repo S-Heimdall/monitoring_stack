@@ -144,6 +144,27 @@ def test_loki_rows_capped_by_limit(monkeypatch):
     assert len(d["rows"]) == 2  # 노출 행은 limit 상한
 
 
+def test_loki_count_over_time_summarized_to_one_row(monkeypatch):
+    # HEIM-254: count_over_time 등 metric 쿼리는 matrix로 온다 — 버킷마다 행을 만들지 않고
+    # series당 1행으로 요약하고, 카운트를 가짜 로그 message로 만들지 않는다.
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": [
+        {"metric": {"service_name": "checkout", "k8s_namespace_name": "otel-demo"},
+         "values": [["1", "10"], ["2", "148"], ["3", "148"]]},
+    ]}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "logs", "provider": "loki",
+        "query": 'sum(count_over_time({service_name="checkout"} |~ "error" [5m]))',
+        "time_window": WINDOW})
+    d = r.json()["data"]
+    assert len(d["rows"]) == 1
+    row = d["rows"][0]
+    assert row["metric_name"] == "log_match_count"
+    assert row["observed_value"] == 148.0
+    assert row["max_value"] == 148.0
+    assert row["sample_count"] == 3
+    assert "message" not in row
+
+
 def test_tempo_query(monkeypatch):
     _patch_upstream(monkeypatch, {"traces": [
         {"traceID": "abc123", "rootServiceName": "checkout", "rootTraceName": "POST /checkout",

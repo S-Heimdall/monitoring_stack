@@ -231,7 +231,57 @@ def _loki(provider: str, query: str, start: datetime, end: datetime, limit: int 
         "limit": limit or 100,
         "direction": "backward",
     })
-    streams = (body.get("data") or {}).get("result") or []
+    data = body.get("data") or {}
+    result = data.get("result") or []
+    # count_over_time 등 LogQL metric 쿼리는 matrix로 온다. 과거엔 이를 로그 스트림으로 오인해
+    # message에 카운트 숫자를 넣고 시계열 버킷마다 행을 만들어 파편화됐다(HEIM-254). matrix는
+    # prometheus처럼 series당 1행 요약, streams는 실제 로그 라인만 돌려준다.
+    if data.get("resultType") == "matrix":
+        return _loki_matrix(query, result, limit)
+    return _loki_streams(result, limit)
+
+
+def _loki_matrix(query: str, series: list, limit: int | None) -> dict:
+    excerpt = None
+    if series:
+        pts = series[0].get("values") or []
+        last = pts[-1][1] if pts else "?"
+        excerpt = f"{query[:120]} = {last}"
+    rows = []
+    for s in series[: _cap(limit, 50)]:
+        m = s.get("metric", {})
+        pts = s.get("values") or []
+        nums = [n for n in (_num(v) for _, v in pts) if isinstance(n, (int, float))]
+        row = {
+            "metric_name": "log_match_count",
+            "service": _service(m),
+            "namespace": _namespace(m),
+            "pod": _pod(m),
+            "container": _container(m),
+            "labels": m,
+            "sample_count": len(pts),
+            "series_start": _num(pts[0][0]) if pts else None,
+            "series_end": _num(pts[-1][0]) if pts else None,
+            "timestamp": _num(pts[-1][0]) if pts else None,
+        }
+        if nums:
+            row["observed_value"] = nums[-1]
+            row["last_value"] = nums[-1]
+            row["max_value"] = max(nums)
+            row["min_value"] = min(nums)
+            row["avg_value"] = round(sum(nums) / len(nums), 6)
+        else:
+            row["observed_value"] = None
+        rows.append(row)
+    return {
+        "row_count": len(series),
+        "result_excerpt": excerpt,
+        "rows": rows,
+        "_series_count": len(series),
+    }
+
+
+def _loki_streams(streams: list, limit: int | None) -> dict:
     row_count = sum(len(s.get("values") or []) for s in streams)
     excerpt = None
     for s in streams:
