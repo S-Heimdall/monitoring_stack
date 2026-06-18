@@ -13,7 +13,8 @@ import os
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app import providers
 from app.schemas import TelemetryQueryRequest, TelemetryQueryResponse
@@ -46,6 +47,34 @@ def _error_detail(code: str, message: str, *, provider: str | None = None, empty
         "empty_reason": empty_reason,
         "provider": provider,
     }
+
+
+@app.exception_handler(RequestValidationError)
+async def _on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    # FastAPI 기본 422(`{"detail": [pydantic 리스트]}`)를 안정 에러 스키마로 정규화한다(HEIM-235).
+    errors = "; ".join(
+        f"{'.'.join(str(part) for part in err.get('loc', []))}: {err.get('msg', '')}"
+        for err in exc.errors()[:5]
+    )
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": _error_detail(
+                "TELEMETRY_QUERY_INVALID",
+                f"request validation failed: {errors}"[:300],
+                empty_reason="unsupported_query",
+            )
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def _on_unhandled(request: Request, exc: Exception) -> JSONResponse:
+    # 미처리 예외도 기본 500 문자열 대신 안정 스키마로 돌려준다.
+    return JSONResponse(
+        status_code=500,
+        content={"detail": _error_detail("TELEMETRY_INTERNAL_ERROR", "internal gateway error")},
+    )
 
 
 def _require_auth(authorization: str | None) -> None:
