@@ -293,3 +293,127 @@ def test_request_validation_normalized_to_stable_schema():
     assert detail["code"] == "TELEMETRY_QUERY_INVALID"
     assert detail["data_status"] == "error"
     assert isinstance(detail["message"], str)
+
+
+# ── Set 4: post-action verification PromQL window contract ─────────────────────────────
+# before-window(장애 구간)과 after-window(조치 후 구간) query가 rows와 data_status를
+# 안정적으로 반환하는지 검증한다. verification_checker의 before/after 비교 판정이 의존한다.
+
+BEFORE_WINDOW = {"from": "2026-06-10T00:00:00Z", "to": "2026-06-10T00:05:00Z"}
+AFTER_WINDOW  = {"from": "2026-06-10T00:10:00Z", "to": "2026-06-10T00:15:00Z"}
+
+
+def test_verification_before_window_returns_rows_and_observed_value(monkeypatch):
+    # 장애 구간(before) — 에러율 높음
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": [
+        {"metric": {"__name__": "http_errors_total", "service_name": "checkout"},
+         "values": [[1, "0.80"], [2, "0.85"], [3, "0.90"]]},
+    ]}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "metrics", "provider": "prometheus",
+        "query": 'rate(http_errors_total{service_name="checkout"}[5m])',
+        "time_window": BEFORE_WINDOW,
+    })
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["data_status"] == "ok"
+    assert d["empty_reason"] is None
+    assert d["row_count"] == 1
+    row = d["rows"][0]
+    assert row["observed_value"] == 0.9   # last value (backward-compat)
+    assert row["max_value"] == 0.9
+    assert row["min_value"] == 0.8
+    assert row["sample_count"] == 3
+
+
+def test_verification_after_window_returns_rows_and_observed_value(monkeypatch):
+    # 조치 후 구간(after) — 에러율 회복
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": [
+        {"metric": {"__name__": "http_errors_total", "service_name": "checkout"},
+         "values": [[1, "0.10"], [2, "0.08"], [3, "0.05"]]},
+    ]}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "metrics", "provider": "prometheus",
+        "query": 'rate(http_errors_total{service_name="checkout"}[5m])',
+        "time_window": AFTER_WINDOW,
+    })
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["data_status"] == "ok"
+    assert d["empty_reason"] is None
+    row = d["rows"][0]
+    assert row["observed_value"] == 0.05
+    assert row["max_value"] == 0.10
+    assert row["sample_count"] == 3
+
+
+def test_verification_threshold_query_passes_stable_rows(monkeypatch):
+    # threshold 기반 판정: observed_value <= threshold 이면 PASS
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": [
+        {"metric": {"__name__": "http_request_duration_p99", "service_name": "payment"},
+         "values": [[1, "320"], [2, "310"], [3, "300"]]},
+    ]}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "metrics", "provider": "prometheus",
+        "query": 'histogram_quantile(0.99, rate(http_request_duration_bucket{service_name="payment"}[5m]))',
+        "time_window": AFTER_WINDOW,
+    })
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["data_status"] == "ok"
+    row = d["rows"][0]
+    # verification_checker가 observed_value를 threshold(예: 500ms)와 비교 가능한 형태여야 한다.
+    assert isinstance(row["observed_value"], float)
+    assert row["observed_value"] == 300.0
+    assert row["max_value"] == 320.0
+
+
+def test_verification_after_window_no_data_returns_stable_empty_contract(monkeypatch):
+    # 조치 후 metric이 아직 수집되지 않은 경우 — INSUFFICIENT_VERIFICATION_DATA 경로
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": []}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "metrics", "provider": "prometheus",
+        "query": 'rate(http_errors_total{service_name="checkout"}[5m])',
+        "time_window": AFTER_WINDOW,
+    })
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["data_status"] == "empty"
+    assert d["empty_reason"] == "no_series_matched"
+    assert d["row_count"] == 0
+    assert d["rows"] == []
+
+
+def test_verification_before_after_label_mismatch_signals_empty(monkeypatch):
+    # label 불일치 — before/after 모두 빈 결과 + 원인 명시
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": []}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "metrics", "provider": "prometheus",
+        "query": 'rate(http_errors_total{service="checkout",namespace="otel-demo"}[5m])',
+        "time_window": BEFORE_WINDOW,
+    })
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["data_status"] == "empty"
+    assert d["empty_reason"] == "label_mismatch_suspected"
+
+
+def test_verification_kubernetes_event_after_rollout_returns_rows(monkeypatch):
+    # Kubernetes rollout 조치 후 이벤트 확인 — after-window에서 ScalingReplicaSet 이벤트 수집
+    _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "streams", "result": [
+        {"stream": {"reason": "ScalingReplicaSet", "namespace": "otel-demo",
+                    "pod": "checkout-deployment-xyz", "container": "checkout"},
+         "values": [["1718000100000000000", "Scaled up replica set checkout-deployment-xyz to 3"]]},
+    ]}})
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "kubernetes_events", "provider": "k8s_events",
+        "query": '{reason="ScalingReplicaSet",namespace="otel-demo"}',
+        "time_window": AFTER_WINDOW,
+    })
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["data_status"] == "ok"
+    assert d["row_count"] == 1
+    row = d["rows"][0]
+    assert row["namespace"] == "otel-demo"
+    assert "ScalingReplicaSet" in row["message"] or row["pod"] == "checkout-deployment-xyz"
