@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from datetime import datetime
 
 import httpx
@@ -43,7 +44,8 @@ MISMATCH_PRONE_LABELS = {"service", "app", "namespace", "pod", "container"}
 
 
 def _upstreams() -> dict[str, str]:
-    # k8s 이벤트는 Loki에 적재되므로 loki upstream을 공유한다.
+    # k8s 이벤트는 Alloy kubernetes_events source가 Loki에 적재한다. provider는 pod log가
+    # 아니라 job=kubernetes-events 스트림만 조회하도록 아래 _k8s_events에서 강제한다.
     loki = os.environ.get("UPSTREAM_LOKI", "heimdall-loki:3100")
     prom = os.environ.get("UPSTREAM_PROMETHEUS", "heimdall-kps-prometheus:9090")
     return {
@@ -241,6 +243,83 @@ def _loki(provider: str, query: str, start: datetime, end: datetime, limit: int 
     return _loki_streams(result, limit)
 
 
+def _event_logql(query: str) -> str:
+    """Force k8s_events to Alloy's kubernetes event stream, never pod logs."""
+    stripped = query.strip()
+    if not stripped.startswith("{") or "}" not in stripped:
+        return '{job="kubernetes-events"}'
+
+    selector, rest = stripped[1:].split("}", 1)
+    matchers: list[tuple[str, str, str]] = []
+    for label, op, value in re.findall(r'([a-zA-Z_:][\w:]*)\s*(=~|=|!=|!~)\s*"([^"]*)"', selector):
+        normalized = "namespace" if label in {"k8s_namespace_name", "namespace"} else label
+        if normalized == "job":
+            continue
+        matchers.append((normalized, op, value))
+
+    ordered = ['job="kubernetes-events"']
+    ordered.extend(f'{label}{op}"{value}"' for label, op, value in matchers)
+    return "{" + ",".join(ordered) + "}" + rest
+
+
+def _parse_event_logfmt(line: str) -> dict:
+    try:
+        parts = shlex.split(line)
+    except ValueError:
+        parts = line.split()
+    fields = {}
+    for part in parts:
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        fields[key] = value
+    return fields
+
+
+def _k8s_event_streams(streams: list, limit: int | None) -> dict:
+    base = _loki_streams(streams, limit)
+    rows = []
+    for row in base["rows"]:
+        fields = _parse_event_logfmt(row.get("message") or "")
+        involved_kind = fields.get("kind")
+        involved_name = fields.get("name")
+        event_message = fields.get("msg")
+        row.update({
+            "reason": fields.get("reason"),
+            "type": fields.get("type"),
+            "count": _num(fields.get("count")),
+            "involved_kind": involved_kind,
+            "involved_name": involved_name,
+            "event_message": event_message,
+            "pod": involved_name if involved_kind == "Pod" else row.get("pod"),
+            "container": None,
+            "real_kubernetes_event": True,
+            "source_kind": "kubernetes_event",
+            "evidence_source": "kubernetes_event",
+        })
+        rows.append(row)
+    base["rows"] = rows
+    if rows:
+        first = rows[0]
+        reason = first.get("reason") or "KubernetesEvent"
+        name = first.get("involved_name") or first.get("namespace") or ""
+        message = first.get("event_message") or first.get("message") or ""
+        base["result_excerpt"] = f"{reason} {name}: {message}".strip()[:200]
+    return base
+
+
+def _k8s_events(query: str, start: datetime, end: datetime, limit: int | None) -> dict:
+    body = _call(f"{_base('k8s_events')}/loki/api/v1/query_range", {
+        "query": _event_logql(query),
+        "start": int(start.timestamp() * 1_000_000_000),
+        "end": int(end.timestamp() * 1_000_000_000),
+        "limit": limit or 100,
+        "direction": "backward",
+    })
+    data = body.get("data") or {}
+    return _k8s_event_streams(data.get("result") or [], limit)
+
+
 def _loki_matrix(query: str, series: list, limit: int | None) -> dict:
     excerpt = None
     if series:
@@ -349,8 +428,10 @@ def run_query(provider: str, query: str, start: datetime, end: datetime, limit: 
     """provider native query 실행 후 {row_count, result_excerpt, rows} 반환."""
     if provider in ("prometheus", "mimir"):
         return _prometheus(provider, query, start, end, limit)
-    if provider in ("loki", "k8s_events"):
+    if provider == "loki":
         return _loki(provider, query, start, end, limit)
+    if provider == "k8s_events":
+        return _k8s_events(query, start, end, limit)
     if provider == "tempo":
         return _tempo(query, start, end, limit)
     raise ProviderError(f"unsupported provider: {provider}")

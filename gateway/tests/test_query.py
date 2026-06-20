@@ -9,8 +9,10 @@ client = TestClient(app)
 WINDOW = {"from": "2026-06-10T00:00:00Z", "to": "2026-06-10T00:10:00Z"}
 
 
-def _patch_upstream(monkeypatch, payload, status=200):
+def _patch_upstream(monkeypatch, payload, status=200, capture=None):
     def fake_get(url, params):
+        if capture is not None:
+            capture.append({"url": url, "params": params})
         return httpx.Response(status, json=payload)
     monkeypatch.setattr(providers, "_get", fake_get)
 
@@ -183,24 +185,32 @@ def test_tempo_query(monkeypatch):
     assert d["rows"][0]["labels"]["traceID"] == "abc123"
 
 
-def test_kubernetes_events_routes_to_loki(monkeypatch):
+def test_kubernetes_events_forces_event_source_and_parses_event_fields(monkeypatch):
+    captured = []
     _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "streams", "result": [
-        {"stream": {"reason": "ScalingReplicaSet", "namespace": "otel-demo", "pod": "payment-abc",
-                    "container": "payment"}, "values": [["1", "Scaled up"]]},
-    ]}})
+        {"stream": {"job": "kubernetes-events", "namespace": "otel-demo", "service_name": "kubernetes-events"},
+         "values": [["1", 'name=payment-abc kind=Pod reason=Killing type=Normal count=1 msg="Stopping container payment" ']]},
+    ]}}, capture=captured)
     r = client.post("/internal/telemetry/query", json={
         "signal": "kubernetes_events", "provider": "k8s_events",
-        "query": '{job="kubernetes-events"}', "time_window": WINDOW})
+        "query": '{namespace="otel-demo"} |~ "reason=(Killing|BackOff)"', "time_window": WINDOW})
     assert r.status_code == 200
+    assert captured[0]["params"]["query"].startswith('{job="kubernetes-events",namespace="otel-demo"}')
     row = r.json()["data"]["rows"][0]
     assert row["namespace"] == "otel-demo"
     assert row["pod"] == "payment-abc"
-    assert row["container"] == "payment"
+    assert row["reason"] == "Killing"
+    assert row["type"] == "Normal"
+    assert row["involved_kind"] == "Pod"
+    assert row["involved_name"] == "payment-abc"
+    assert row["event_message"] == "Stopping container payment"
+    assert row["real_kubernetes_event"] is True
+    assert row["source_kind"] == "kubernetes_event"
 
 
 def test_kubernetes_events_empty_no_rows_in_window_contract(monkeypatch):
     _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "streams", "result": [
-        {"stream": {"reason": "ScalingReplicaSet", "namespace": "otel-demo"}, "values": []},
+        {"stream": {"job": "kubernetes-events", "namespace": "otel-demo"}, "values": []},
     ]}})
     r = client.post("/internal/telemetry/query", json={
         "signal": "kubernetes_events", "provider": "k8s_events",
@@ -401,9 +411,8 @@ def test_verification_before_after_label_mismatch_signals_empty(monkeypatch):
 def test_verification_kubernetes_event_after_rollout_returns_rows(monkeypatch):
     # Kubernetes rollout 조치 후 이벤트 확인 — after-window에서 ScalingReplicaSet 이벤트 수집
     _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "streams", "result": [
-        {"stream": {"reason": "ScalingReplicaSet", "namespace": "otel-demo",
-                    "pod": "checkout-deployment-xyz", "container": "checkout"},
-         "values": [["1718000100000000000", "Scaled up replica set checkout-deployment-xyz to 3"]]},
+        {"stream": {"job": "kubernetes-events", "namespace": "otel-demo"},
+         "values": [["1718000100000000000", 'name=checkout-deployment-xyz kind=ReplicaSet reason=ScalingReplicaSet type=Normal msg="Scaled up replica set checkout-deployment-xyz to 3" ']]},
     ]}})
     r = client.post("/internal/telemetry/query", json={
         "signal": "kubernetes_events", "provider": "k8s_events",
@@ -416,4 +425,7 @@ def test_verification_kubernetes_event_after_rollout_returns_rows(monkeypatch):
     assert d["row_count"] == 1
     row = d["rows"][0]
     assert row["namespace"] == "otel-demo"
-    assert "ScalingReplicaSet" in row["message"] or row["pod"] == "checkout-deployment-xyz"
+    assert row["reason"] == "ScalingReplicaSet"
+    assert row["involved_kind"] == "ReplicaSet"
+    assert row["involved_name"] == "checkout-deployment-xyz"
+    assert row["real_kubernetes_event"] is True
