@@ -15,6 +15,16 @@ def _patch_upstream(monkeypatch, payload, status=200):
     monkeypatch.setattr(providers, "_get", fake_get)
 
 
+def _patch_upstream_by_url(monkeypatch, routes):
+    def fake_get(url, params):
+        for needle, payload in routes.items():
+            if needle in url:
+                return httpx.Response(200, json=payload)
+        return httpx.Response(404, text=f"no route for {url}")
+
+    monkeypatch.setattr(providers, "_get", fake_get)
+
+
 def test_prometheus_query(monkeypatch):
     _patch_upstream(monkeypatch, {"status": "success", "data": {"resultType": "matrix", "result": [
         {"metric": {"__name__": "up", "job": "checkout", "service_name": "checkout",
@@ -166,21 +176,51 @@ def test_loki_count_over_time_summarized_to_one_row(monkeypatch):
 
 
 def test_tempo_query(monkeypatch):
-    _patch_upstream(monkeypatch, {"traces": [
-        {"traceID": "abc123", "rootServiceName": "checkout", "rootTraceName": "POST /checkout",
-         "rootServiceNamespace": "otel-demo", "durationMs": 3200},
-    ]})
+    _patch_upstream_by_url(monkeypatch, {
+        "/api/search": {"traces": [
+            {"traceID": "abc123", "rootServiceName": "checkout", "rootTraceName": "POST /checkout",
+             "rootServiceNamespace": "otel-demo", "durationMs": 3200},
+        ]},
+        "/api/traces/abc123": {"resourceSpans": [
+            {"resource": {"attributes": [
+                {"key": "service.name", "value": {"stringValue": "checkout"}},
+                {"key": "service.namespace", "value": {"stringValue": "otel-demo"}},
+            ]}, "scopeSpans": [{"spans": [
+                {
+                    "traceId": "abc123",
+                    "spanId": "span-root",
+                    "name": "POST /checkout",
+                    "startTimeUnixNano": "1000000000",
+                    "endTimeUnixNano": "4200000000",
+                    "status": {"code": "STATUS_CODE_ERROR"},
+                },
+                {
+                    "traceId": "abc123",
+                    "spanId": "span-child",
+                    "parentSpanId": "span-root",
+                    "name": "payment call",
+                    "startTimeUnixNano": "1500000000",
+                    "endTimeUnixNano": "4100000000",
+                    "status": {"code": "STATUS_CODE_OK"},
+                },
+            ]}]}
+        ]},
+    })
     r = client.post("/internal/telemetry/query", json={
         "signal": "traces", "provider": "tempo", "query": "{}", "time_window": WINDOW})
     d = r.json()["data"]
-    assert d["row_count"] == 1
+    assert d["row_count"] == 2
     assert "checkout" in d["result_excerpt"]
-    assert len(d["rows"]) == 1
+    assert len(d["rows"]) == 2
     assert d["rows"][0]["service"] == "checkout"
     assert d["rows"][0]["namespace"] == "otel-demo"
-    assert d["rows"][0]["span"] == "POST /checkout"
+    assert d["rows"][0]["operation"] == "POST /checkout"
     assert d["rows"][0]["trace_id"] == "abc123"
-    assert d["rows"][0]["labels"]["traceID"] == "abc123"
+    assert d["rows"][0]["span_id"] == "span-root"
+    assert d["rows"][0]["parent_span_id"] is None
+    assert d["rows"][0]["duration_ms"] == 3200.0
+    assert d["rows"][0]["status"] == "STATUS_CODE_ERROR"
+    assert d["rows"][0]["critical_path_rank"] == 1
 
 
 def test_kubernetes_events_routes_to_loki(monkeypatch):
@@ -196,6 +236,71 @@ def test_kubernetes_events_routes_to_loki(monkeypatch):
     assert row["namespace"] == "otel-demo"
     assert row["pod"] == "payment-abc"
     assert row["container"] == "payment"
+    assert row["evidence_source"] == "kubernetes_log_signal"
+    assert row["real_kubernetes_event"] is False
+    assert row["source_kind"] == "loki_log"
+
+
+def test_kubernetes_provider_returns_structured_cluster_state(monkeypatch):
+    def fake_kubernetes_get(path):
+        if path == "/api/v1/namespaces/otel-demo/events":
+            return {"items": [
+                {
+                    "kind": "Event",
+                    "metadata": {"name": "payment.123", "namespace": "otel-demo"},
+                    "reason": "FailedScheduling",
+                    "message": "0/3 nodes available",
+                    "lastTimestamp": "2026-06-10T00:02:00Z",
+                    "involvedObject": {"kind": "Pod", "name": "payment-abc"},
+                }
+            ]}
+        if path == "/api/v1/namespaces/otel-demo/pods":
+            return {"items": [
+                {
+                    "kind": "Pod",
+                    "metadata": {"name": "payment-abc", "namespace": "otel-demo", "labels": {"app": "payment"}},
+                    "status": {"phase": "Running", "containerStatuses": [{"restartCount": 2}]},
+                }
+            ]}
+        if path == "/apis/apps/v1/namespaces/otel-demo/deployments":
+            return {"items": [
+                {
+                    "kind": "Deployment",
+                    "metadata": {"name": "payment", "namespace": "otel-demo"},
+                    "spec": {"replicas": 3},
+                    "status": {"readyReplicas": 2, "conditions": [{"type": "Available", "status": "False"}]},
+                }
+            ]}
+        if path == "/apis/apps/v1/namespaces/otel-demo/replicasets":
+            return {"items": []}
+        if path == "/apis/autoscaling/v2/namespaces/otel-demo/horizontalpodautoscalers":
+            return {"items": [
+                {
+                    "kind": "HorizontalPodAutoscaler",
+                    "metadata": {"name": "payment", "namespace": "otel-demo"},
+                    "spec": {"maxReplicas": 10},
+                    "status": {"currentReplicas": 3, "desiredReplicas": 6, "conditions": [{"type": "ScalingLimited", "status": "True"}]},
+                }
+            ]}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(providers, "_kubernetes_get", fake_kubernetes_get)
+    r = client.post("/internal/telemetry/query", json={
+        "signal": "kubernetes_events",
+        "provider": "kubernetes",
+        "query": '{namespace="otel-demo"}',
+        "time_window": WINDOW,
+    })
+    assert r.status_code == 200
+    rows = r.json()["data"]["rows"]
+    assert {row["kind"] for row in rows} >= {"Event", "Pod", "Deployment", "HorizontalPodAutoscaler"}
+    hpa = next(row for row in rows if row["kind"] == "HorizontalPodAutoscaler")
+    assert hpa["current_replicas"] == 3
+    assert hpa["desired_replicas"] == 6
+    assert hpa["max_replicas"] == 10
+    event = next(row for row in rows if row["kind"] == "Event")
+    assert event["reason"] == "FailedScheduling"
+    assert event["involved_object"] == {"kind": "Pod", "name": "payment-abc"}
 
 
 def test_kubernetes_events_empty_no_rows_in_window_contract(monkeypatch):

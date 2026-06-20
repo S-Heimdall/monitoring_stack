@@ -22,7 +22,7 @@ class TimeWindow(BaseModel):
 
 class TelemetryQueryRequest(BaseModel):
     signal: str  # metrics | logs | traces | kubernetes_events
-    provider: str  # prometheus | mimir | loki | tempo | jaeger | k8s_events
+    provider: str  # prometheus | mimir | loki | tempo | kubernetes | kubernetes_log_signal | k8s_events
     query: str
     time_window: TimeWindow
     limit: int | None = None
