@@ -67,6 +67,11 @@ def test_prometheus_range_summary(monkeypatch):
     assert row["max_value"] == 1.0
     assert row["min_value"] == 0.2
     assert abs(row["avg_value"] - 0.725) < 1e-6
+    assert row["latest"] == 0.8
+    assert row["last"] == 0.8
+    assert row["max"] == 1.0
+    assert row["min"] == 0.2
+    assert abs(row["avg"] - 0.725) < 1e-6
     assert row["series_start"] == 1.0 and row["series_end"] == 4.0
 
 
