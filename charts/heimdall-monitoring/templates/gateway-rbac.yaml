@@ -1,0 +1,39 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "heimdall-monitoring.name" . }}-gateway
+  labels:
+    {{- include "heimdall-monitoring.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "heimdall-monitoring.name" . }}-gateway-read
+  labels:
+    {{- include "heimdall-monitoring.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["events", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "heimdall-monitoring.name" . }}-gateway-read
+  labels:
+    {{- include "heimdall-monitoring.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "heimdall-monitoring.name" . }}-gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "heimdall-monitoring.name" . }}-gateway-read
+{{- end }}

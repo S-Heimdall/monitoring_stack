@@ -15,6 +15,7 @@ spec:
       labels:
         app.kubernetes.io/name: {{ include "heimdall-monitoring.name" . }}-gateway
     spec:
+      serviceAccountName: {{ include "heimdall-monitoring.name" . }}-gateway
       containers:
         - name: gateway
           image: {{ .Values.gateway.image | quote }}
