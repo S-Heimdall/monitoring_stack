@@ -213,6 +213,11 @@ def _prometheus(provider: str, query: str, start: datetime, end: datetime, limit
             row["max_value"] = max(nums)
             row["min_value"] = min(nums)
             row["avg_value"] = round(sum(nums) / len(nums), 6)
+            row["latest"] = nums[-1]
+            row["last"] = nums[-1]
+            row["max"] = row["max_value"]
+            row["min"] = row["min_value"]
+            row["avg"] = row["avg_value"]
         else:
             row["observed_value"] = _num(pts[-1][1]) if pts else None
         rows.append(row)
@@ -349,6 +354,11 @@ def _loki_matrix(query: str, series: list, limit: int | None) -> dict:
             row["max_value"] = max(nums)
             row["min_value"] = min(nums)
             row["avg_value"] = round(sum(nums) / len(nums), 6)
+            row["latest"] = nums[-1]
+            row["last"] = nums[-1]
+            row["max"] = row["max_value"]
+            row["min"] = row["min_value"]
+            row["avg"] = row["avg_value"]
         else:
             row["observed_value"] = None
         rows.append(row)
